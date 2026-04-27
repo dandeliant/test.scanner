@@ -37,6 +37,15 @@
   .step{display:inline-block;padding:3px 9px;border-radius:999px;background:#eee;font-size:12px;margin-right:8px}
   .step.active{background:#111;color:#fff}
   .step.done{background:#0a7a2f;color:#fff}
+  .upload-btn{
+    font:inherit;padding:8px 12px;border:1px dashed #888;border-radius:12px;
+    background:#fff;cursor:pointer;color:#111;display:inline-block
+  }
+  .upload-btn:has(input:disabled){opacity:.5;cursor:not-allowed}
+  .warn{
+    margin-top:10px;padding:10px 12px;border-radius:10px;
+    background:#fff7e6;border:1px solid #ffe0a3;color:#7a4b00;font-size:13px
+  }
 </style>
 </head>
 <body>
@@ -61,7 +70,17 @@
     <button id="reset">Reset</button>
     <span class="chip"><input id="debug" type="checkbox" /><label for="debug">Debug (podgląd warpu)</label></span>
   </div>
-  <div class="muted" id="status" style="margin-top:8px">Gotowy. Włącz kamerę.</div>
+  <div class="row" style="margin-top:8px">
+    <span class="muted">Bez kamery? Wgraj zdjęcie:</span>
+    <label class="upload-btn">Wgraj zdjęcie QR
+      <input id="fileQR" type="file" accept="image/*" capture="environment" hidden />
+    </label>
+    <label class="upload-btn">Wgraj zdjęcie karty
+      <input id="fileSheet" type="file" accept="image/*" capture="environment" hidden disabled />
+    </label>
+  </div>
+  <div class="muted" id="status" style="margin-top:8px">Gotowy. Włącz kamerę albo wgraj zdjęcie.</div>
+  <div id="warnBox" class="warn hidden"></div>
 
   <div class="grid" style="margin-top:10px">
     <video id="video" playsinline muted></video>
@@ -133,6 +152,9 @@
   const btnQR = document.getElementById("scanQR");
   const btnSheet = document.getElementById("scanSheet");
   const btnReset = document.getElementById("reset");
+  const fileQR = document.getElementById("fileQR");
+  const fileSheet = document.getElementById("fileSheet");
+  const warnBox = document.getElementById("warnBox");
 
   const step1 = document.getElementById("step1");
   const step2 = document.getElementById("step2");
@@ -143,6 +165,33 @@
   let cvReady = false;
 
   function setStatus(s){ statusEl.textContent = s; }
+  function setWarn(html){
+    if(!html){ warnBox.classList.add("hidden"); warnBox.innerHTML = ""; return; }
+    warnBox.classList.remove("hidden"); warnBox.innerHTML = html;
+  }
+
+  // Wykryj kontekst uniemożliwiający kamerę (file://, brak HTTPS itd.)
+  function cameraSupported(){
+    if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return false;
+    if(typeof window.isSecureContext === "boolean" && !window.isSecureContext) return false;
+    return true;
+  }
+
+  if(!cameraSupported()){
+    btnStart.disabled = true;
+    const proto = location.protocol;
+    let why = "";
+    if(proto === "file:"){
+      why = "Strona otwarta z dysku (<code>file://</code>) — przeglądarki blokują kamerę. ";
+    } else if(!window.isSecureContext){
+      why = "Brak HTTPS lub localhost — przeglądarki blokują kamerę. ";
+    } else {
+      why = "Twoja przeglądarka nie wspiera <code>getUserMedia</code>. ";
+    }
+    setWarn(why + "Możesz zrobić zdjęcie telefonem i kliknąć <b>Wgraj zdjęcie</b> albo opublikować pliki na GitHub Pages / serwerze HTTPS.");
+    setStatus("Kamera niedostępna w tym kontekście. Wgraj zdjęcie z dysku.");
+    fileSheet.disabled = false;
+  }
   function setStep(active){
     [step1, step2, step3].forEach((el, i)=>{
       el.classList.remove("active","done");
@@ -161,6 +210,10 @@
 
   // ---------- Kamera ----------
   async function startCamera(){
+    if(!cameraSupported()){
+      setStatus("Kamera niedostępna w tym kontekście. Użyj „Wgraj zdjęcie".");
+      return;
+    }
     try{
       stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 } },
@@ -171,8 +224,18 @@
       btnQR.disabled = false;
       setStep(2);
       setStatus("Kamera działa. Pokaż QR z karty (lub klucza).");
+      setWarn("");
     }catch(e){
-      setStatus("Błąd kamery: " + (e.message || e));
+      let msg = e.message || String(e);
+      if(e.name === "NotAllowedError" || e.name === "SecurityError"){
+        msg = "brak zgody na dostęp do kamery. Sprawdź ikonę kłódki w pasku adresu i zezwól na kamerę.";
+      } else if(e.name === "NotFoundError" || e.name === "OverconstrainedError"){
+        msg = "nie znaleziono kamery na tym urządzeniu.";
+      } else if(e.name === "NotReadableError"){
+        msg = "kamera jest zajęta przez inny program (np. inna karta przeglądarki, Skype, Teams).";
+      }
+      setStatus("Błąd kamery: " + msg);
+      setWarn("Jeśli kamera nie zadziała — zrób zdjęcie i kliknij <b>Wgraj zdjęcie</b>.");
     }
   }
 
@@ -182,6 +245,32 @@
     canvas.width = w; canvas.height = h;
     ctx.drawImage(video, 0, 0, w, h);
     return ctx.getImageData(0, 0, w, h);
+  }
+
+  function loadFileToCanvas(file){
+    return new Promise((resolve, reject)=>{
+      if(!file) return reject(new Error("Brak pliku."));
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = ()=>{
+        // Ogranicz rozmiar do 2400px po dłuższej krawędzi (przyspiesza i zmniejsza pamięć)
+        const maxSide = 2400;
+        let w = img.naturalWidth, h = img.naturalHeight;
+        if(Math.max(w,h) > maxSide){
+          const k = maxSide / Math.max(w,h);
+          w = Math.round(w*k); h = Math.round(h*k);
+        }
+        canvas.width = w; canvas.height = h;
+        ctx.drawImage(img, 0, 0, w, h);
+        URL.revokeObjectURL(url);
+        resolve(ctx.getImageData(0, 0, w, h));
+      };
+      img.onerror = ()=>{
+        URL.revokeObjectURL(url);
+        reject(new Error("Nie udało się otworzyć obrazu."));
+      };
+      img.src = url;
+    });
   }
 
   // ---------- QR ----------
@@ -199,41 +288,70 @@
     return { v: p.v || 2, tasks };
   }
 
+  function tryDecodeQR(img){
+    const code = jsQR(img.data, img.width, img.height, { inversionAttempts: "attemptBoth" });
+    if(!code || !code.data) return null;
+    return code.data;
+  }
+
+  function applyQR(text){
+    const obj = JSON.parse(text);
+    spec = expandPayload(obj);
+    keyStateEl.textContent = "ZAŁADOWANY";
+    keyStateEl.className = "ok";
+    keyPreviewEl.textContent =
+      `Wersja: ${spec.v}\nZadania: ${spec.tasks.length}\n\n` +
+      spec.tasks.map(t =>
+        t.type === "open"
+          ? `${t.nr}. otwarte (Ocenia nauczyciel)`
+          : `${t.nr}. A–${LETTERS[t.options-1]}, poprawna: ${t.correct}`
+      ).join("\n");
+    btnSheet.disabled = false;
+    fileSheet.disabled = false;
+    setStep(3);
+    setStatus("QR wczytany. Teraz pokaż całą kartę ucznia (4 czarne kwadraty w rogach widoczne) lub wgraj jej zdjęcie.");
+  }
+
   async function scanQRLoop(){
+    if(!stream){
+      setStatus("Kamera nieaktywna. Włącz kamerę albo użyj „Wgraj zdjęcie QR".");
+      return;
+    }
     setStatus("Szukam QR… trzymaj kod w kadrze.");
     const maxMs = 12000;
     const t0 = performance.now();
     while(performance.now() - t0 < maxMs){
       const img = snap();
-      const code = jsQR(img.data, img.width, img.height, { inversionAttempts: "attemptBoth" });
-      if(code && code.data){
-        try{
-          const obj = JSON.parse(code.data);
-          spec = expandPayload(obj);
-          keyStateEl.textContent = "ZAŁADOWANY";
-          keyStateEl.className = "ok";
-          keyPreviewEl.textContent =
-            `Wersja: ${spec.v}\nZadania: ${spec.tasks.length}\n\n` +
-            spec.tasks.map(t =>
-              t.type === "open"
-                ? `${t.nr}. otwarte (Ocenia nauczyciel)`
-                : `${t.nr}. A–${LETTERS[t.options-1]}, poprawna: ${t.correct}`
-            ).join("\n");
-          btnSheet.disabled = false;
-          setStep(3);
-          setStatus("QR wczytany. Teraz pokaż całą kartę ucznia (4 czarne kwadraty w rogach widoczne) i naciśnij „Skanuj kartę ucznia".");
-          return;
-        }catch(e){
-          setStatus("QR znaleziony, ale nie pasuje: " + (e.message || e));
-          return;
-        }
+      const data = tryDecodeQR(img);
+      if(data){
+        try{ applyQR(data); }
+        catch(e){ setStatus("QR znaleziony, ale nie pasuje: " + (e.message || e)); }
+        return;
       }
       await new Promise(r => setTimeout(r, 60));
     }
-    setStatus("Nie znaleziono QR. Spróbuj ponownie (lepsze światło / bliżej).");
+    setStatus("Nie znaleziono QR. Spróbuj ponownie (lepsze światło / bliżej) lub wgraj zdjęcie.");
   }
 
   btnQR.addEventListener("click", scanQRLoop);
+
+  fileQR.addEventListener("change", async (e)=>{
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if(!file) return;
+    try{
+      setStatus("Czytam QR ze zdjęcia…");
+      const img = await loadFileToCanvas(file);
+      const data = tryDecodeQR(img);
+      if(!data){
+        setStatus("Nie znaleziono QR na zdjęciu. Zrób ostrzejsze zdjęcie z bliska.");
+        return;
+      }
+      applyQR(data);
+    }catch(err){
+      setStatus("Błąd wczytywania zdjęcia: " + (err.message || err));
+    }
+  });
 
   // ---------- Markery rogów ----------
   function findCornerMarkers(srcRGBA){
@@ -486,42 +604,61 @@
   }
 
   // ---------- Skan karty ----------
+  function processSheetFromCanvas(){
+    if(!spec) throw new Error("Najpierw zeskanuj QR z kluczem.");
+    if(!cvReady) throw new Error("OpenCV jeszcze się ładuje, spróbuj za chwilę.");
+
+    const src = cv.imread(canvas);
+    let warped = null;
+    try{
+      const corners = findCornerMarkers(src);
+      warped = warpToCanonical(src, corners);
+      const answers = readAnswers(warped, spec);
+      const score = grade(answers, spec);
+
+      const lines = [];
+      for(const d of score.details){
+        if(d.type === "open"){
+          lines.push(`${d.nr}. Ocenia nauczyciel`);
+        } else {
+          const tag = d.ok ? "✓" : "✗";
+          const fc = d.filledCount === 1 ? "" : ` (zaznaczono kratek: ${d.filledCount})`;
+          lines.push(`${tag} ${d.nr}. wybrano: ${d.marked ?? "—"} | poprawna: ${d.correct}${fc}`);
+        }
+      }
+      summaryEl.innerHTML = `Wynik: <span class="pct">${score.pct}%</span> &nbsp; (${score.got}/${score.max} pkt)`;
+      resultEl.textContent = lines.join("\n");
+      setStatus("Gotowe. Jeśli wyniki są nietrafione: włącz Debug i sprawdź podgląd.");
+    } finally {
+      src.delete();
+      if(warped) warped.delete();
+    }
+  }
+
   btnSheet.addEventListener("click", async ()=>{
     try{
-      if(!spec) throw new Error("Najpierw zeskanuj QR z kluczem.");
-      if(!cvReady) throw new Error("OpenCV jeszcze się ładuje, spróbuj za chwilę.");
-
+      if(!stream) throw new Error("Kamera nieaktywna. Włącz kamerę albo użyj „Wgraj zdjęcie karty".");
       setStatus("Skanuję kartę… trzymaj kartkę prostopadle, w równym świetle.");
       await new Promise(r => setTimeout(r, 120));
-
       snap();
-      const src = cv.imread(canvas);
-      let warped = null;
-      try{
-        const corners = findCornerMarkers(src);
-        warped = warpToCanonical(src, corners);
-        const answers = readAnswers(warped, spec);
-        const score = grade(answers, spec);
-
-        const lines = [];
-        for(const d of score.details){
-          if(d.type === "open"){
-            lines.push(`${d.nr}. Ocenia nauczyciel`);
-          } else {
-            const tag = d.ok ? "✓" : "✗";
-            const fc = d.filledCount === 1 ? "" : ` (zaznaczono kratek: ${d.filledCount})`;
-            lines.push(`${tag} ${d.nr}. wybrano: ${d.marked ?? "—"} | poprawna: ${d.correct}${fc}`);
-          }
-        }
-        summaryEl.innerHTML = `Wynik: <span class="pct">${score.pct}%</span> &nbsp; (${score.got}/${score.max} pkt)`;
-        resultEl.textContent = lines.join("\n");
-        setStatus("Gotowe. Jeśli wyniki są nietrafione: włącz Debug i sprawdź podgląd.");
-      } finally {
-        src.delete();
-        if(warped) warped.delete();
-      }
+      processSheetFromCanvas();
     }catch(e){
       setStatus("Błąd OMR: " + (e.message || e));
+    }
+  });
+
+  fileSheet.addEventListener("change", async (e)=>{
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if(!file) return;
+    try{
+      if(!spec) throw new Error("Najpierw zeskanuj/wgraj QR z kluczem.");
+      if(!cvReady) throw new Error("OpenCV jeszcze się ładuje, spróbuj za chwilę.");
+      setStatus("Czytam zdjęcie karty…");
+      await loadFileToCanvas(file);
+      processSheetFromCanvas();
+    }catch(err){
+      setStatus("Błąd OMR: " + (err.message || err));
     }
   });
 
@@ -533,8 +670,10 @@
     summaryEl.textContent = "Wynik pojawi się po skanie karty.";
     resultEl.textContent = "";
     btnSheet.disabled = true;
+    fileSheet.disabled = !cameraSupported() ? false : true;
+    dbgCanvas.classList.add("hidden");
     setStep(stream ? 2 : 1);
-    setStatus(stream ? "Reset. Zeskanuj QR ponownie." : "Reset. Włącz kamerę.");
+    setStatus(stream ? "Reset. Zeskanuj QR ponownie." : "Reset. Włącz kamerę albo wgraj QR z dysku.");
   });
 
   btnStart.addEventListener("click", startCamera);
