@@ -47,11 +47,28 @@
     background:#fff7e6;border:1px solid #ffe0a3;color:#7a4b00;font-size:13px
   }
   .warn.hidden{display:none}
-  .diag{font-size:11px;color:#888;margin-top:6px}
+  .diag{font-size:11px;color:#888;margin-top:6px;font-family:ui-monospace,Consolas,monospace}
   .diag b{color:#444}
+  .err-banner{
+    position:sticky;top:0;z-index:50;
+    background:#b00020;color:#fff;padding:10px 14px;border-radius:10px;
+    margin:0 0 12px;font-weight:600;display:none
+  }
+  .err-banner.show{display:block}
+  .log-panel{
+    background:#0f1117;color:#e8e8e8;font-family:ui-monospace,Consolas,monospace;
+    font-size:12px;padding:10px;border-radius:10px;margin-top:8px;
+    max-height:160px;overflow:auto;white-space:pre-wrap;word-break:break-word
+  }
+  .log-panel .l{padding:2px 0}
+  .log-panel .err{color:#ff8a8a}
+  .log-panel .ok{color:#7fe3a4}
+  .log-panel .info{color:#9ec5ff}
 </style>
 </head>
 <body>
+<div id="errBanner" class="err-banner" style="max-width:1000px"></div>
+
 <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;max-width:1000px">
   <h1 style="margin:0 0 12px">Skaner kart odpowiedzi</h1>
   <div style="display:flex;gap:8px">
@@ -80,9 +97,10 @@
     <input id="fileQR" type="file" accept="image/*" style="position:absolute;left:-9999px;width:1px;height:1px;opacity:0" />
     <input id="fileSheet" type="file" accept="image/*" style="position:absolute;left:-9999px;width:1px;height:1px;opacity:0" />
   </div>
-  <div class="muted" id="status" style="margin-top:8px">Gotowy. Włącz kamerę albo wgraj zdjęcie.</div>
+  <div id="status" style="margin-top:8px;padding:8px 10px;background:#eef3ff;border:1px solid #cdd9f5;border-radius:8px;color:#0a2a6b;font-size:14px;font-weight:500">Gotowy. Włącz kamerę albo wgraj zdjęcie.</div>
   <div id="warnBox" class="warn hidden"></div>
   <div class="diag" id="diagBox"></div>
+  <div class="log-panel" id="logBox"></div>
 
   <div class="grid" style="margin-top:10px">
     <video id="video" playsinline muted></video>
@@ -105,6 +123,46 @@
 <script async src="https://docs.opencv.org/4.x/opencv.js"></script>
 
 <script>
+  // ---------- Globalny log + onerror (widoczne na stronie, bez DevTools) ----------
+  function _log(level, ...args){
+    try{
+      const box = document.getElementById("logBox");
+      if(!box) return;
+      const t = new Date().toLocaleTimeString();
+      const line = document.createElement("div");
+      line.className = "l " + level;
+      line.textContent = `[${t}] ${level.toUpperCase()}: ` + args.map(a=>{
+        if(a instanceof Error) return a.name + ": " + a.message;
+        if(typeof a === "object"){ try{ return JSON.stringify(a); }catch(_){ return String(a); } }
+        return String(a);
+      }).join(" ");
+      box.appendChild(line);
+      box.scrollTop = box.scrollHeight;
+    }catch(_){}
+  }
+  function logInfo(...a){ console.log(...a); _log("info", ...a); }
+  function logOk(...a){ console.log(...a); _log("ok", ...a); }
+  function logErr(...a){ console.error(...a); _log("err", ...a); }
+
+  function showErrBanner(text){
+    const b = document.getElementById("errBanner");
+    if(!b) return;
+    b.textContent = text;
+    b.classList.add("show");
+  }
+
+  window.addEventListener("error", function(e){
+    logErr("window.error:", e.message, "at", (e.filename || "") + ":" + (e.lineno || ""));
+    showErrBanner("Błąd JS: " + e.message);
+  });
+  window.addEventListener("unhandledrejection", function(e){
+    const reason = e.reason && (e.reason.message || e.reason) || "Unknown";
+    logErr("unhandledrejection:", reason);
+    showErrBanner("Nieobsłużony błąd: " + reason);
+  });
+
+  logInfo("Skrypt startuje. URL=", location.href);
+
   const LETTERS = ["A","B","C","D","E","F"];
 
   // MUSI ODPOWIADAĆ generator.html
@@ -167,6 +225,23 @@
     ` · isSecureContext=${window.isSecureContext}` +
     ` · mediaDevices=${!!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)}` +
     ` · jsQR=${typeof jsQR !== "undefined"}`;
+  logInfo("DOM podpięty. Diagnostyka:", diagBox.textContent);
+
+  // KRYTYCZNE: Podpinamy handlery od razu po pobraniu elementów,
+  // żeby ew. błąd dalej w skrypcie nie zostawił "martwych" przycisków.
+  btnStart.addEventListener("click", function(){
+    logInfo("==> KLIK: Włącz kamerę");
+    try{ startCamera(); }
+    catch(e){ logErr("startCamera throw:", e); showErrBanner("Błąd: " + (e.message||e)); }
+  });
+  document.getElementById("logoutBtn").addEventListener("click", ()=>{
+    sessionStorage.removeItem("ts_session_v1");
+    localStorage.removeItem("ts_session_v1");
+    if(window.__ts_stream){
+      try{ window.__ts_stream.getTracks().forEach(t => t.stop()); }catch(e){}
+    }
+    location.replace("index.html");
+  });
 
   const step1 = document.getElementById("step1");
   const step2 = document.getElementById("step2");
@@ -220,24 +295,36 @@
 
   // ---------- Kamera ----------
   async function startCamera(){
-    console.log("[scanner] startCamera() wywołane");
+    logInfo("startCamera() — klik zarejestrowany");
+    setStatus("Próbuję włączyć kamerę…");
     if(!cameraSupported()){
-      console.warn("[scanner] kamera niedostępna: protocol=", location.protocol, "secureCtx=", window.isSecureContext, "mediaDevices=", !!navigator.mediaDevices);
-      setStatus("Kamera niedostępna w tym kontekście. Użyj „Wgraj zdjęcie QR".");
+      logErr("Kamera niedostępna: protocol=", location.protocol, "secureCtx=", window.isSecureContext, "mediaDevices=", !!navigator.mediaDevices);
+      setStatus("KAMERA NIEDOSTĘPNA — patrz czerwony banner u góry strony.");
+      const why = location.protocol === "file:"
+        ? "Strona otwarta z dysku (file://). Przeglądarki blokują kamerę poza HTTPS/localhost."
+        : (!window.isSecureContext
+            ? "Brak HTTPS / localhost — przeglądarki blokują kamerę."
+            : "Twoja przeglądarka nie wspiera getUserMedia.");
+      showErrBanner(why + " — użyj „Wgraj zdjęcie QR".");
       return;
     }
     try{
+      logInfo("Wywołuję getUserMedia…");
       stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 } },
         audio: false
       });
+      window.__ts_stream = stream;
+      logOk("Strumień kamery uzyskany.");
       video.srcObject = stream;
       await video.play();
+      logOk("video.play() OK. videoWidth=", video.videoWidth, "videoHeight=", video.videoHeight);
       btnQR.disabled = false;
       setStep(2);
       setStatus("Kamera działa. Pokaż QR z karty (lub klucza).");
       setWarn("");
     }catch(e){
+      logErr("getUserMedia error:", e.name, e.message);
       let msg = e.message || String(e);
       if(e.name === "NotAllowedError" || e.name === "SecurityError"){
         msg = "brak zgody na dostęp do kamery. Sprawdź ikonę kłódki w pasku adresu i zezwól na kamerę.";
@@ -247,6 +334,7 @@
         msg = "kamera jest zajęta przez inny program (np. inna karta przeglądarki, Skype, Teams).";
       }
       setStatus("Błąd kamery: " + msg);
+      showErrBanner("Błąd kamery: " + msg);
       setWarn("Jeśli kamera nie zadziała — zrób zdjęcie i kliknij <b>Wgraj zdjęcie</b>.");
     }
   }
@@ -349,12 +437,12 @@
 
   // Klik w przycisk uploadu wywołuje ukryty input
   btnUploadQR.addEventListener("click", ()=>{
-    console.log("[scanner] klik: Wgraj zdjęcie QR");
+    logInfo("Klik: Wgraj zdjęcie QR — otwieram okno wyboru pliku");
     fileQR.click();
   });
   btnUploadSheet.addEventListener("click", ()=>{
-    if(btnUploadSheet.disabled) return;
-    console.log("[scanner] klik: Wgraj zdjęcie karty");
+    if(btnUploadSheet.disabled){ logInfo("Wgraj zdjęcie karty — disabled (najpierw QR)"); return; }
+    logInfo("Klik: Wgraj zdjęcie karty");
     fileSheet.click();
   });
 
@@ -703,19 +791,8 @@
     setStatus(stream ? "Reset. Zeskanuj QR ponownie." : "Reset. Włącz kamerę albo wgraj QR z dysku.");
   });
 
-  btnStart.addEventListener("click", startCamera);
-
-  // Wyloguj
-  document.getElementById("logoutBtn").addEventListener("click", ()=>{
-    sessionStorage.removeItem("ts_session_v1");
-    localStorage.removeItem("ts_session_v1");
-    if(stream){
-      try{ stream.getTracks().forEach(t => t.stop()); }catch(e){}
-    }
-    location.replace("index.html");
-  });
-
   setStep(1);
+  logOk("Inicjalizacja zakończona — wszystkie handlery podpięte.");
 </script>
 </body>
 </html>
