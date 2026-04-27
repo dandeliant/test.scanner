@@ -1,0 +1,529 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Skaner: QR + karta odpowiedzi</title>
+<style>
+  *{box-sizing:border-box}
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:16px;color:#111;background:#f3f3f3}
+  h1{font-size:20px;margin:0 0 12px}
+  .row{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+  button{font:inherit;padding:9px 12px;border:1px solid #bbb;border-radius:12px;background:#f7f7f7;cursor:pointer}
+  button.primary{background:#111;color:#fff;border-color:#111}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  .panel{background:white;border:1px solid #e6e6e6;border-radius:16px;padding:14px;margin:12px 0;max-width:1000px}
+  .muted{color:#666;font-size:12px}
+  video,canvas{width:100%;max-width:760px;border-radius:14px;border:1px solid #ddd;background:#000;display:block}
+  .grid{display:grid;grid-template-columns:1fr;gap:10px}
+  pre{white-space:pre-wrap;word-break:break-word;background:#fafafa;border:1px solid #eee;border-radius:12px;padding:10px;font-size:12.5px;max-height:60vh;overflow:auto}
+  .ok{color:#0a7a2f;font-weight:700}
+  .bad{color:#b00020;font-weight:700}
+  .hidden{display:none !important}
+  .chip{display:inline-flex;align-items:center;gap:8px;border:1px solid #ddd;border-radius:999px;padding:6px 10px;font-size:12px;color:#333;background:#fafafa}
+  input[type="checkbox"]{width:16px;height:16px}
+  .summary{font-size:18px;font-weight:700}
+  .summary .pct{font-size:24px;color:#0a7a2f}
+  .step{display:inline-block;padding:3px 9px;border-radius:999px;background:#eee;font-size:12px;margin-right:8px}
+  .step.active{background:#111;color:#fff}
+  .step.done{background:#0a7a2f;color:#fff}
+</style>
+</head>
+<body>
+<h1>Skaner kart odpowiedzi</h1>
+
+<div class="panel">
+  <div class="row" style="margin-bottom:6px">
+    <span class="step" id="step1">1. Kamera</span>
+    <span class="step" id="step2">2. QR (klucz)</span>
+    <span class="step" id="step3">3. Karta ucznia</span>
+  </div>
+  <div class="row">
+    <button id="startCam" class="primary">Włącz kamerę</button>
+    <button id="scanQR" disabled>Skanuj QR (klucz)</button>
+    <button id="scanSheet" disabled>Skanuj kartę ucznia</button>
+    <button id="reset">Reset</button>
+    <span class="chip"><input id="debug" type="checkbox" /><label for="debug">Debug (podgląd warpu)</label></span>
+  </div>
+  <div class="muted" id="status" style="margin-top:8px">Gotowy. Włącz kamerę.</div>
+
+  <div class="grid" style="margin-top:10px">
+    <video id="video" playsinline muted></video>
+    <canvas id="canvas" class="hidden"></canvas>
+    <canvas id="debugCanvas" class="hidden"></canvas>
+  </div>
+</div>
+
+<div class="panel">
+  <div><b>Klucz:</b> <span id="keyState" class="bad">brak</span></div>
+  <pre id="keyPreview">(najpierw zeskanuj QR z karty)</pre>
+</div>
+
+<div class="panel">
+  <div class="summary" id="summary">Wynik pojawi się po skanie karty.</div>
+  <pre id="result"></pre>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+<script async src="https://docs.opencv.org/4.x/opencv.js"></script>
+
+<script>
+  const LETTERS = ["A","B","C","D","E","F"];
+
+  // MUSI ODPOWIADAĆ generator.html
+  const LAYOUT = {
+    W: 1200, H: 1700,
+    markCenter: 60,
+    answerY: 320,
+    answerH: 1280,
+    colLeftX: 80,
+    colRightX: 600,
+    bubbleStartX: 100,
+    bubblePitch: 60,
+    bubbleSize: 38,
+    minRowH: 32,
+    maxRowH: 70
+  };
+
+  function computeRowH(taskCount){
+    const maxPerCol = Math.ceil(taskCount/2);
+    const h = Math.floor(LAYOUT.answerH / maxPerCol);
+    return Math.max(LAYOUT.minRowH, Math.min(LAYOUT.maxRowH, h));
+  }
+
+  function bubbleCenter(colX, rowIdx, optIdx, rowH){
+    return {
+      cx: colX + LAYOUT.bubbleStartX + optIdx * LAYOUT.bubblePitch,
+      cy: LAYOUT.answerY + (rowIdx + 0.5) * rowH
+    };
+  }
+
+  // ---------- DOM ----------
+  const video = document.getElementById("video");
+  const canvas = document.getElementById("canvas");
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+
+  const dbgCanvas = document.getElementById("debugCanvas");
+  const dbgCtx = dbgCanvas.getContext("2d");
+  const debugToggle = document.getElementById("debug");
+
+  const statusEl = document.getElementById("status");
+  const keyStateEl = document.getElementById("keyState");
+  const keyPreviewEl = document.getElementById("keyPreview");
+  const summaryEl = document.getElementById("summary");
+  const resultEl = document.getElementById("result");
+
+  const btnStart = document.getElementById("startCam");
+  const btnQR = document.getElementById("scanQR");
+  const btnSheet = document.getElementById("scanSheet");
+  const btnReset = document.getElementById("reset");
+
+  const step1 = document.getElementById("step1");
+  const step2 = document.getElementById("step2");
+  const step3 = document.getElementById("step3");
+
+  let stream = null;
+  let spec = null;          // rozszerzony spec po dekodowaniu QR
+  let cvReady = false;
+
+  function setStatus(s){ statusEl.textContent = s; }
+  function setStep(active){
+    [step1, step2, step3].forEach((el, i)=>{
+      el.classList.remove("active","done");
+      if(i+1 < active) el.classList.add("done");
+      else if(i+1 === active) el.classList.add("active");
+    });
+  }
+
+  // OpenCV.js
+  window.Module = {
+    onRuntimeInitialized(){
+      cvReady = true;
+      setStatus("OpenCV gotowy. Włącz kamerę i zeskanuj QR z karty.");
+    }
+  };
+
+  // ---------- Kamera ----------
+  async function startCamera(){
+    try{
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 } },
+        audio: false
+      });
+      video.srcObject = stream;
+      await video.play();
+      btnQR.disabled = false;
+      setStep(2);
+      setStatus("Kamera działa. Pokaż QR z karty (lub klucza).");
+    }catch(e){
+      setStatus("Błąd kamery: " + (e.message || e));
+    }
+  }
+
+  function snap(){
+    const w = video.videoWidth || 1280;
+    const h = video.videoHeight || 720;
+    canvas.width = w; canvas.height = h;
+    ctx.drawImage(video, 0, 0, w, h);
+    return ctx.getImageData(0, 0, w, h);
+  }
+
+  // ---------- QR ----------
+  function expandPayload(p){
+    if(!p || typeof p !== "object") throw new Error("QR: nieprawidłowy obiekt.");
+    if(!Array.isArray(p.t)) throw new Error("QR: brak pola t[].");
+    const tasks = p.t.map((entry, i)=>{
+      if(!Array.isArray(entry) || entry.length < 2) throw new Error(`QR: zły wpis t[${i}].`);
+      const [opts, correctIdx] = entry;
+      if(opts === 0) return { nr: i+1, type: "open" };
+      const o = Math.max(2, Math.min(6, opts));
+      const c = Math.max(0, Math.min(o-1, correctIdx|0));
+      return { nr: i+1, type: "closed", options: o, correct: LETTERS[c] };
+    });
+    return { v: p.v || 2, tasks };
+  }
+
+  async function scanQRLoop(){
+    setStatus("Szukam QR… trzymaj kod w kadrze.");
+    const maxMs = 12000;
+    const t0 = performance.now();
+    while(performance.now() - t0 < maxMs){
+      const img = snap();
+      const code = jsQR(img.data, img.width, img.height, { inversionAttempts: "attemptBoth" });
+      if(code && code.data){
+        try{
+          const obj = JSON.parse(code.data);
+          spec = expandPayload(obj);
+          keyStateEl.textContent = "ZAŁADOWANY";
+          keyStateEl.className = "ok";
+          keyPreviewEl.textContent =
+            `Wersja: ${spec.v}\nZadania: ${spec.tasks.length}\n\n` +
+            spec.tasks.map(t =>
+              t.type === "open"
+                ? `${t.nr}. otwarte (Ocenia nauczyciel)`
+                : `${t.nr}. A–${LETTERS[t.options-1]}, poprawna: ${t.correct}`
+            ).join("\n");
+          btnSheet.disabled = false;
+          setStep(3);
+          setStatus("QR wczytany. Teraz pokaż całą kartę ucznia (4 czarne kwadraty w rogach widoczne) i naciśnij „Skanuj kartę ucznia".");
+          return;
+        }catch(e){
+          setStatus("QR znaleziony, ale nie pasuje: " + (e.message || e));
+          return;
+        }
+      }
+      await new Promise(r => setTimeout(r, 60));
+    }
+    setStatus("Nie znaleziono QR. Spróbuj ponownie (lepsze światło / bliżej).");
+  }
+
+  btnQR.addEventListener("click", scanQRLoop);
+
+  // ---------- Markery rogów ----------
+  function findCornerMarkers(srcRGBA){
+    const w = srcRGBA.cols, h = srcRGBA.rows;
+
+    const gray = new cv.Mat();
+    cv.cvtColor(srcRGBA, gray, cv.COLOR_RGBA2GRAY, 0);
+
+    const blur = new cv.Mat();
+    cv.GaussianBlur(gray, blur, new cv.Size(5,5), 0);
+
+    const thr = new cv.Mat();
+    // Otsu inwersja (czarne markery -> białe blob-y)
+    cv.threshold(blur, thr, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU);
+
+    const contours = new cv.MatVector();
+    const hierarchy = new cv.Mat();
+    cv.findContours(thr, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+    const buckets = { tl: [], tr: [], br: [], bl: [] };
+
+    for(let i=0;i<contours.size();i++){
+      const cnt = contours.get(i);
+      const area = cv.contourArea(cnt);
+      // Zakres rozmiaru: marker ~50x50 w canvasie 1200x1700, w fotce większy/mniejszy
+      if(area < (w*h) * 0.0003 || area > (w*h) * 0.06){ cnt.delete(); continue; }
+
+      const rect = cv.boundingRect(cnt);
+      const ar = rect.width / rect.height;
+      if(ar < 0.7 || ar > 1.4){ cnt.delete(); continue; }
+
+      // Gęstość wypełnienia: marker jest pełny w środku
+      const density = area / (rect.width * rect.height);
+      if(density < 0.65){ cnt.delete(); continue; }
+
+      const cx = rect.x + rect.width/2;
+      const cy = rect.y + rect.height/2;
+      const nx = cx / w, ny = cy / h;
+
+      let q = null;
+      if(nx < 0.45 && ny < 0.45) q = "tl";
+      else if(nx > 0.55 && ny < 0.45) q = "tr";
+      else if(nx > 0.55 && ny > 0.55) q = "br";
+      else if(nx < 0.45 && ny > 0.55) q = "bl";
+
+      if(q){
+        buckets[q].push({ cx, cy, area });
+      }
+      cnt.delete();
+    }
+
+    gray.delete(); blur.delete(); thr.delete(); contours.delete(); hierarchy.delete();
+
+    const pick = arr => {
+      if(!arr.length) return null;
+      arr.sort((a, b) => b.area - a.area);
+      return { x: arr[0].cx, y: arr[0].cy };
+    };
+    const tl = pick(buckets.tl);
+    const tr = pick(buckets.tr);
+    const br = pick(buckets.br);
+    const bl = pick(buckets.bl);
+
+    if(!tl || !tr || !br || !bl){
+      const miss = [];
+      if(!tl) miss.push("góra-lewo");
+      if(!tr) miss.push("góra-prawo");
+      if(!br) miss.push("dół-prawo");
+      if(!bl) miss.push("dół-lewo");
+      throw new Error("Nie wykryto markerów: " + miss.join(", ") + ". Popraw kadr/światło, trzymaj kartkę prostopadle.");
+    }
+    return [tl, tr, br, bl];
+  }
+
+  function warpToCanonical(srcRGBA, corners){
+    const L = LAYOUT;
+    const dsize = new cv.Size(L.W, L.H);
+
+    const srcTri = cv.matFromArray(4, 1, cv.CV_32FC2, [
+      corners[0].x, corners[0].y,
+      corners[1].x, corners[1].y,
+      corners[2].x, corners[2].y,
+      corners[3].x, corners[3].y
+    ]);
+    const dstTri = cv.matFromArray(4, 1, cv.CV_32FC2, [
+      L.markCenter, L.markCenter,
+      L.W - L.markCenter, L.markCenter,
+      L.W - L.markCenter, L.H - L.markCenter,
+      L.markCenter, L.H - L.markCenter
+    ]);
+    const M = cv.getPerspectiveTransform(srcTri, dstTri);
+    const out = new cv.Mat();
+    cv.warpPerspective(srcRGBA, out, M, dsize, cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar(255,255,255,255));
+    srcTri.delete(); dstTri.delete(); M.delete();
+    return out;
+  }
+
+  // ---------- OMR ----------
+  function preprocessBinary(warpRGBA){
+    const gray = new cv.Mat();
+    cv.cvtColor(warpRGBA, gray, cv.COLOR_RGBA2GRAY, 0);
+    const blur = new cv.Mat();
+    cv.GaussianBlur(gray, blur, new cv.Size(3,3), 0);
+    // adaptiveThreshold radzi sobie z nierównym oświetleniem
+    const thr = new cv.Mat();
+    cv.adaptiveThreshold(blur, thr, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY_INV, 31, 12);
+    gray.delete(); blur.delete();
+    return thr; // single channel: 255 = ciemne (wypełnione)
+  }
+
+  function fillRatio(thr, cx, cy, size){
+    // Pomijamy obwódkę kratki (38px) — bierzemy wewnętrzny kwadrat ~60% rozmiaru
+    const inner = Math.round(size * 0.55);
+    const x = Math.round(cx - inner/2);
+    const y = Math.round(cy - inner/2);
+    const xx = Math.max(0, Math.min(thr.cols - inner, x));
+    const yy = Math.max(0, Math.min(thr.rows - inner, y));
+    const roi = thr.roi(new cv.Rect(xx, yy, inner, inner));
+    const nz = cv.countNonZero(roi);
+    roi.delete();
+    return nz / (inner * inner);
+  }
+
+  function readAnswers(warped, spec){
+    const L = LAYOUT;
+    const taskCount = spec.tasks.length;
+    const rowH = computeRowH(taskCount);
+    const maxPerCol = Math.ceil(taskCount/2);
+
+    const thr = preprocessBinary(warped);
+    const answers = [];
+
+    // Najpierw zbieramy wszystkie wartości fillRatio, by oszacować próg
+    const allRatios = [];
+    const cellInfo = []; // do debug i finalnego decydowania
+
+    for(let i=0;i<taskCount;i++){
+      const t = spec.tasks[i];
+      if(t.type === "open"){
+        cellInfo.push(null);
+        continue;
+      }
+      const isLeft = i < maxPerCol;
+      const rowIdx = isLeft ? i : i - maxPerCol;
+      const colX = isLeft ? L.colLeftX : L.colRightX;
+      const ratios = [];
+      const centers = [];
+      for(let j=0;j<t.options;j++){
+        const {cx, cy} = bubbleCenter(colX, rowIdx, j, rowH);
+        const r = fillRatio(thr, cx, cy, L.bubbleSize);
+        ratios.push(r);
+        centers.push({cx, cy});
+        allRatios.push(r);
+      }
+      cellInfo.push({ ratios, centers, taskIdx: i });
+    }
+
+    // Adaptacyjny próg: szukamy progu między „pustymi" a „zamalowanymi"
+    // Empiryczny: > 0.30 to zwykle zamalowanie, < 0.15 to puste.
+    // Dodatkowo bierzemy 30% wyżej od mediany jako fallback.
+    const sorted = allRatios.slice().sort((a,b)=>a-b);
+    const median = sorted[Math.floor(sorted.length/2)] || 0;
+    const ABS_MIN = 0.28;
+    const adaptive = Math.max(ABS_MIN, median + 0.18);
+    const ratioThr = Math.min(adaptive, 0.55);
+
+    for(let i=0;i<taskCount;i++){
+      const t = spec.tasks[i];
+      if(t.type === "open"){
+        answers.push({ nr: t.nr, type: "open", marked: null });
+        continue;
+      }
+      const info = cellInfo[i];
+      const ratios = info.ratios;
+      const filled = ratios.map(r => r > ratioThr);
+      const filledCount = filled.filter(Boolean).length;
+      let marked = null;
+      if(filledCount === 1){
+        marked = LETTERS[filled.findIndex(Boolean)];
+      } else if(filledCount > 1){
+        // Wielokrotne zaznaczenie — niejednoznaczne
+        marked = null;
+      }
+      answers.push({
+        nr: t.nr, type: "closed", marked, filledCount,
+        ratios: ratios.map(r => +r.toFixed(3)),
+        ratioThr: +ratioThr.toFixed(3)
+      });
+    }
+
+    // Debug: pokaż warp + zaznaczone kratki
+    if(debugToggle.checked){
+      dbgCanvas.classList.remove("hidden");
+      dbgCanvas.width = warped.cols;
+      dbgCanvas.height = warped.rows;
+      cv.imshow(dbgCanvas, warped);
+
+      dbgCtx.lineWidth = 2;
+      dbgCtx.font = "12px system-ui";
+      dbgCtx.fillStyle = "rgba(0,0,0,0.7)";
+      dbgCtx.fillRect(8, 8, 360, 28);
+      dbgCtx.fillStyle = "white";
+      dbgCtx.fillText(`ratioThr=${ratioThr.toFixed(3)} | mediana=${median.toFixed(3)}`, 16, 26);
+
+      for(let i=0;i<taskCount;i++){
+        const info = cellInfo[i];
+        if(!info) continue;
+        for(let j=0;j<info.ratios.length;j++){
+          const r = info.ratios[j];
+          const isF = r > ratioThr;
+          const {cx, cy} = info.centers[j];
+          dbgCtx.strokeStyle = isF ? "rgba(0,160,0,0.95)" : "rgba(220,40,40,0.6)";
+          dbgCtx.strokeRect(cx - L.bubbleSize/2, cy - L.bubbleSize/2, L.bubbleSize, L.bubbleSize);
+          dbgCtx.fillStyle = "rgba(0,0,0,0.6)";
+          dbgCtx.fillRect(cx - 18, cy - L.bubbleSize/2 - 14, 36, 12);
+          dbgCtx.fillStyle = "white";
+          dbgCtx.fillText(r.toFixed(2), cx - 14, cy - L.bubbleSize/2 - 4);
+        }
+      }
+    } else {
+      dbgCanvas.classList.add("hidden");
+    }
+
+    thr.delete();
+    return answers;
+  }
+
+  function grade(answers, spec){
+    let max = 0, got = 0;
+    const details = [];
+    for(const t of spec.tasks){
+      if(t.type === "open"){
+        details.push({ nr: t.nr, type: "open" });
+        continue;
+      }
+      max++;
+      const a = answers.find(x => x.nr === t.nr);
+      const marked = a ? a.marked : null;
+      const ok = !!(marked && marked === t.correct);
+      if(ok) got++;
+      details.push({
+        nr: t.nr, type: "closed", ok, marked, correct: t.correct,
+        filledCount: a?.filledCount ?? 0,
+        ratios: a?.ratios ?? [],
+        ratioThr: a?.ratioThr
+      });
+    }
+    const pct = max > 0 ? Math.round((got/max) * 1000) / 10 : 0;
+    return { got, max, pct, details };
+  }
+
+  // ---------- Skan karty ----------
+  btnSheet.addEventListener("click", async ()=>{
+    try{
+      if(!spec) throw new Error("Najpierw zeskanuj QR z kluczem.");
+      if(!cvReady) throw new Error("OpenCV jeszcze się ładuje, spróbuj za chwilę.");
+
+      setStatus("Skanuję kartę… trzymaj kartkę prostopadle, w równym świetle.");
+      await new Promise(r => setTimeout(r, 120));
+
+      snap();
+      const src = cv.imread(canvas);
+      let warped = null;
+      try{
+        const corners = findCornerMarkers(src);
+        warped = warpToCanonical(src, corners);
+        const answers = readAnswers(warped, spec);
+        const score = grade(answers, spec);
+
+        const lines = [];
+        for(const d of score.details){
+          if(d.type === "open"){
+            lines.push(`${d.nr}. Ocenia nauczyciel`);
+          } else {
+            const tag = d.ok ? "✓" : "✗";
+            const fc = d.filledCount === 1 ? "" : ` (zaznaczono kratek: ${d.filledCount})`;
+            lines.push(`${tag} ${d.nr}. wybrano: ${d.marked ?? "—"} | poprawna: ${d.correct}${fc}`);
+          }
+        }
+        summaryEl.innerHTML = `Wynik: <span class="pct">${score.pct}%</span> &nbsp; (${score.got}/${score.max} pkt)`;
+        resultEl.textContent = lines.join("\n");
+        setStatus("Gotowe. Jeśli wyniki są nietrafione: włącz Debug i sprawdź podgląd.");
+      } finally {
+        src.delete();
+        if(warped) warped.delete();
+      }
+    }catch(e){
+      setStatus("Błąd OMR: " + (e.message || e));
+    }
+  });
+
+  btnReset.addEventListener("click", ()=>{
+    spec = null;
+    keyStateEl.textContent = "brak";
+    keyStateEl.className = "bad";
+    keyPreviewEl.textContent = "(najpierw zeskanuj QR z karty)";
+    summaryEl.textContent = "Wynik pojawi się po skanie karty.";
+    resultEl.textContent = "";
+    btnSheet.disabled = true;
+    setStep(stream ? 2 : 1);
+    setStatus(stream ? "Reset. Zeskanuj QR ponownie." : "Reset. Włącz kamerę.");
+  });
+
+  btnStart.addEventListener("click", startCamera);
+
+  setStep(1);
+</script>
+</body>
+</html>

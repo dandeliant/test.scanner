@@ -1,0 +1,425 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Generator kart odpowiedzi + klucz + QR</title>
+<style>
+  :root{
+    --ink:#111;
+    --muted:#666;
+    --accent:#b00020;
+  }
+  *{box-sizing:border-box}
+  html, body, .sheet{
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:16px;color:var(--ink);background:#f3f3f3}
+  h1{font-size:20px;margin:0 0 12px}
+  .row{display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end}
+  label{display:block;font-size:12px;color:var(--muted);margin-bottom:4px}
+  input,select,button{font:inherit;padding:8px 10px;border:1px solid #ccc;border-radius:10px;background:white}
+  button{cursor:pointer;border:1px solid #bbb;background:#f7f7f7}
+  button.primary{background:#111;color:#fff;border-color:#111}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  .panel{background:white;border:1px solid #e6e6e6;border-radius:16px;padding:14px;margin:12px 0;max-width:1200px}
+  .tasks{width:100%;border-collapse:collapse}
+  .tasks th,.tasks td{border-bottom:1px solid #eee;padding:8px;vertical-align:middle}
+  .tasks th{font-size:12px;color:var(--muted);text-align:left}
+  .pill{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border:1px solid #ddd;border-radius:999px;font-size:12px;color:var(--muted);background:#fafafa}
+  .small{font-size:12px;color:var(--muted)}
+  .hidden{display:none !important}
+  .printbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  .out{display:flex;flex-direction:column;align-items:center;gap:18px;margin-top:14px}
+
+  /* SHEET — A4, kanoniczny układ 1200x1700 SVG */
+  .sheet{
+    width:210mm;
+    height:297mm;
+    background:#fff;
+    box-shadow:0 0 14px rgba(0,0,0,.12);
+    position:relative;
+  }
+  .sheet svg{display:block;width:100%;height:100%}
+
+  @page{size:A4;margin:0}
+  @media print{
+    body{margin:0;background:white}
+    .ui,.printbar,.panel,h1{display:none !important}
+    .out{margin:0;gap:0}
+    .sheet{box-shadow:none;page-break-after:always;break-after:page}
+    .sheet:last-child{page-break-after:auto;break-after:auto}
+    .sheet.hidden{display:none !important}
+  }
+</style>
+</head>
+<body>
+<div class="ui">
+  <h1>Generator kart odpowiedzi + klucz + QR</h1>
+
+  <div class="panel">
+    <div class="row">
+      <div>
+        <label>Ilość zadań</label>
+        <input id="taskCount" type="number" min="1" max="200" value="13" style="width:120px" />
+      </div>
+      <div>
+        <button id="build" class="primary">Utwórz listę zadań</button>
+      </div>
+      <span class="pill">Wpisz liczbę opcji (np. 3 = A–C, 6 = A–F). Zaznacz „Otwarte" by „Ocenia nauczyciel".</span>
+    </div>
+
+    <div style="margin-top:12px;overflow:auto;max-height:50vh">
+      <table class="tasks" id="taskTable"></table>
+    </div>
+
+    <div class="printbar" style="margin-top:14px">
+      <button id="generate" class="primary">Generuj kartę odpowiedzi + klucz + QR</button>
+      <button id="printStudent" disabled>Drukuj: karta ucznia</button>
+      <button id="printKey" disabled>Drukuj: klucz</button>
+      <button id="printBoth" disabled>Drukuj: oba</button>
+      <span class="small" id="status"></span>
+    </div>
+  </div>
+</div>
+
+<div class="out">
+  <div class="sheet hidden" id="studentSheet"></div>
+  <div class="sheet hidden" id="keySheet"></div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
+<script>
+  const LETTERS = ["A","B","C","D","E","F"];
+
+  // KANONICZNY UKŁAD (jednostki SVG = piksele po warpie). 1200x1700 ~ A4.
+  const LAYOUT = {
+    W: 1200, H: 1700,
+    markCenter: 60,    // środek markera od krawędzi
+    markSize: 60,      // bok kwadratu markera
+    titleY: 140,
+    qrX: 920, qrY: 100, qrSize: 180,
+    answerY: 320,
+    answerH: 1280,
+    colLeftX: 80,
+    colRightX: 600,
+    colW: 520,
+    numW: 70,
+    bubbleStartX: 100, // środek pierwszej kratki względem początku kolumny
+    bubblePitch: 60,
+    bubbleSize: 38,
+    minRowH: 32,
+    maxRowH: 70
+  };
+
+  function computeRowH(taskCount){
+    const maxPerCol = Math.ceil(taskCount/2);
+    const h = Math.floor(LAYOUT.answerH / maxPerCol);
+    return Math.max(LAYOUT.minRowH, Math.min(LAYOUT.maxRowH, h));
+  }
+
+  function bubbleCenter(colX, rowIdx, optIdx, rowH){
+    return {
+      cx: colX + LAYOUT.bubbleStartX + optIdx * LAYOUT.bubblePitch,
+      cy: LAYOUT.answerY + (rowIdx + 0.5) * rowH
+    };
+  }
+
+  // ---------- UI: lista zadań ----------
+  const elTaskCount = document.getElementById("taskCount");
+  const elTaskTable = document.getElementById("taskTable");
+  const elStatus = document.getElementById("status");
+  const elStudent = document.getElementById("studentSheet");
+  const elKey = document.getElementById("keySheet");
+  const btnPrintS = document.getElementById("printStudent");
+  const btnPrintK = document.getElementById("printKey");
+  const btnPrintB = document.getElementById("printBoth");
+
+  function buildTaskRows(n){
+    elTaskTable.innerHTML = `
+      <thead>
+        <tr>
+          <th style="width:70px">Zad.</th>
+          <th style="width:170px">Typ</th>
+          <th style="width:160px">Liczba opcji</th>
+          <th>Prawidłowa</th>
+        </tr>
+      </thead>
+      <tbody></tbody>`;
+    const tb = elTaskTable.querySelector("tbody");
+    for(let i=1;i<=n;i++){
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td><b>${i}</b></td>
+        <td>
+          <select class="type">
+            <option value="closed" selected>Test (zamknięte)</option>
+            <option value="open">Otwarte</option>
+          </select>
+        </td>
+        <td>
+          <input class="opts" type="number" min="2" max="6" value="3" style="width:90px" />
+          <span class="small range">A–C</span>
+        </td>
+        <td><select class="correct"></select></td>`;
+      const sel = tr.querySelector(".correct");
+      LETTERS.forEach(L=>{
+        const o=document.createElement("option");
+        o.value=L; o.textContent=L; sel.appendChild(o);
+      });
+      sel.value = "A";
+
+      const typeSel = tr.querySelector(".type");
+      const optsInp = tr.querySelector(".opts");
+      const range = tr.querySelector(".range");
+
+      function sync(){
+        const isOpen = typeSel.value === "open";
+        optsInp.disabled = isOpen;
+        sel.disabled = isOpen;
+        if(isOpen){
+          range.textContent = "—";
+          return;
+        }
+        let k = parseInt(optsInp.value || "3", 10);
+        if(Number.isNaN(k)) k = 3;
+        k = Math.max(2, Math.min(6, k));
+        optsInp.value = String(k);
+        range.textContent = `A–${LETTERS[k-1]}`;
+        if(LETTERS.indexOf(sel.value) > k-1) sel.value = "A";
+        Array.from(sel.options).forEach(opt=>{
+          opt.hidden = LETTERS.indexOf(opt.value) > k-1;
+        });
+      }
+
+      typeSel.addEventListener("change", sync);
+      optsInp.addEventListener("input", sync);
+      sync();
+      tb.appendChild(tr);
+    }
+  }
+
+  function readSpec(){
+    const rows = Array.from(elTaskTable.querySelectorAll("tbody tr"));
+    if(!rows.length) throw new Error("Najpierw utwórz listę zadań.");
+    const tasks = rows.map((tr, idx)=>{
+      const type = tr.querySelector(".type").value;
+      if(type === "open"){
+        return { nr: idx+1, type: "open" };
+      }
+      let options = parseInt(tr.querySelector(".opts").value || "3", 10);
+      if(Number.isNaN(options)) options = 3;
+      options = Math.max(2, Math.min(6, options));
+      const correct = tr.querySelector(".correct").value;
+      return { nr: idx+1, type: "closed", options, correct };
+    });
+    return { v: 2, tasks };
+  }
+
+  // Zwarty payload do QR: { v, t: [[options, correctIdx], ...] } gdzie options=0 oznacza zadanie otwarte
+  function compactPayload(spec){
+    return {
+      v: 2,
+      t: spec.tasks.map(t =>
+        t.type === "open"
+          ? [0, 0]
+          : [t.options, LETTERS.indexOf(t.correct)]
+      )
+    };
+  }
+
+  // ---------- Renderowanie SVG ----------
+  function svgEscape(s){
+    return String(s).replace(/[&<>"']/g, c => ({
+      "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"
+    }[c]));
+  }
+
+  function buildSheetSVG(spec, isKey, qrDataUrl){
+    const L = LAYOUT;
+    const taskCount = spec.tasks.length;
+    const rowH = computeRowH(taskCount);
+    const maxPerCol = Math.ceil(taskCount/2);
+
+    let s = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${L.W} ${L.H}" preserveAspectRatio="xMidYMid meet">`;
+    s += `<rect x="0" y="0" width="${L.W}" height="${L.H}" fill="#fff"/>`;
+
+    // Markery: 4 czarne kwadraty w rogach
+    const markCorners = [
+      [L.markCenter, L.markCenter],
+      [L.W - L.markCenter, L.markCenter],
+      [L.W - L.markCenter, L.H - L.markCenter],
+      [L.markCenter, L.H - L.markCenter]
+    ];
+    for(const [cx, cy] of markCorners){
+      s += `<rect x="${cx - L.markSize/2}" y="${cy - L.markSize/2}" width="${L.markSize}" height="${L.markSize}" fill="#000"/>`;
+    }
+
+    // Tytuł
+    const title = isKey ? "KLUCZ ODPOWIEDZI" : "WYPEŁNIA UCZEŃ";
+    s += `<text x="${L.W/2}" y="${L.titleY}" text-anchor="middle" font-size="36" font-weight="700" font-family="system-ui, sans-serif" fill="#000">${title}</text>`;
+
+    // Pola w nagłówku
+    if(!isKey){
+      s += `<text x="140" y="210" font-size="18" font-family="system-ui" fill="#000">Imię i nazwisko:</text>`;
+      s += `<line x1="320" y1="215" x2="900" y2="215" stroke="#000" stroke-width="1.6"/>`;
+      s += `<text x="140" y="265" font-size="18" font-family="system-ui" fill="#000">Klasa:</text>`;
+      s += `<line x1="220" y1="270" x2="500" y2="270" stroke="#000" stroke-width="1.6"/>`;
+      s += `<text x="540" y="265" font-size="18" font-family="system-ui" fill="#000">Data:</text>`;
+      s += `<line x1="610" y1="270" x2="900" y2="270" stroke="#000" stroke-width="1.6"/>`;
+    } else {
+      s += `<text x="140" y="210" font-size="16" font-family="system-ui" fill="#222">Czarne kratki = poprawne odpowiedzi.</text>`;
+      s += `<text x="140" y="240" font-size="16" font-family="system-ui" fill="#222">Zadania otwarte: „Ocenia nauczyciel".</text>`;
+      s += `<text x="140" y="270" font-size="13" font-family="system-ui" fill="#666">Zadań: ${taskCount}.</text>`;
+    }
+
+    // Ramka i obraz QR
+    s += `<rect x="${L.qrX}" y="${L.qrY}" width="${L.qrSize}" height="${L.qrSize}" fill="#fff" stroke="#000" stroke-width="2"/>`;
+    if(qrDataUrl){
+      s += `<image href="${qrDataUrl}" x="${L.qrX+4}" y="${L.qrY+4}" width="${L.qrSize-8}" height="${L.qrSize-8}" preserveAspectRatio="none"/>`;
+    }
+    s += `<text x="${L.qrX + L.qrSize/2}" y="${L.qrY + L.qrSize + 18}" text-anchor="middle" font-size="11" font-family="system-ui" fill="#666">QR: klucz + układ</text>`;
+
+    // Wiersze odpowiedzi
+    s += `<g font-family="system-ui, sans-serif">`;
+    for(let i=0;i<taskCount;i++){
+      const isLeft = i < maxPerCol;
+      const rowIdx = isLeft ? i : i - maxPerCol;
+      const colX = isLeft ? L.colLeftX : L.colRightX;
+      const t = spec.tasks[i];
+      const cy = L.answerY + (rowIdx + 0.5) * rowH;
+      const yTop = cy - rowH/2;
+
+      // Komórka z numerem
+      s += `<rect x="${colX}" y="${yTop}" width="${L.numW}" height="${rowH}" fill="#fff" stroke="#000" stroke-width="1.4"/>`;
+      const numFs = Math.min(20, Math.floor(rowH * 0.5));
+      s += `<text x="${colX + L.numW/2}" y="${cy + numFs/3}" text-anchor="middle" font-size="${numFs}" font-weight="700" fill="#000">${t.nr}.</text>`;
+
+      // Strefa odpowiedzi
+      const optsX = colX + L.numW;
+      const optsW = L.colW - L.numW;
+
+      if(t.type === "open"){
+        s += `<rect x="${optsX}" y="${yTop}" width="${optsW}" height="${rowH}" fill="#fff" stroke="#000" stroke-width="1.4"/>`;
+        const fs = Math.min(15, Math.floor(rowH * 0.36));
+        s += `<text x="${optsX + optsW/2}" y="${cy + fs/3}" text-anchor="middle" font-size="${fs}" font-style="italic" fill="#000">Ocenia nauczyciel</text>`;
+      } else {
+        s += `<rect x="${optsX}" y="${yTop}" width="${optsW}" height="${rowH}" fill="#fff" stroke="#000" stroke-width="1.0"/>`;
+        const correctIdx = LETTERS.indexOf(t.correct);
+        for(let j=0;j<t.options;j++){
+          const {cx} = bubbleCenter(colX, rowIdx, j, rowH);
+          const isCorrect = isKey && j === correctIdx;
+          const fill = isCorrect ? "#000" : "#fff";
+          const stroke = isCorrect ? "#000" : "var(--accent)";
+          const txtCol = isCorrect ? "#fff" : "#b00020";
+          s += `<rect x="${cx - L.bubbleSize/2}" y="${cy - L.bubbleSize/2}" width="${L.bubbleSize}" height="${L.bubbleSize}" fill="${fill}" stroke="#b00020" stroke-width="2.4" rx="4" ${isCorrect ? `style="fill:#000;stroke:#000"` : ``}/>`;
+          const fs = Math.min(20, Math.floor(L.bubbleSize * 0.55));
+          s += `<text x="${cx}" y="${cy + fs/3}" text-anchor="middle" font-size="${fs}" font-weight="700" fill="${txtCol}">${LETTERS[j]}</text>`;
+        }
+      }
+    }
+    s += `</g>`;
+    s += `</svg>`;
+    return s;
+  }
+
+  // ---------- QR jako data URL ----------
+  function buildQRDataUrl(text){
+    return new Promise((resolve, reject)=>{
+      const tmp = document.createElement("div");
+      tmp.style.cssText = "position:absolute;left:-9999px;top:-9999px";
+      document.body.appendChild(tmp);
+      try{
+        // qrcodejs preferuje canvas, fallback img
+        new QRCode(tmp, {
+          text,
+          width: 320,
+          height: 320,
+          correctLevel: QRCode.CorrectLevel.M
+        });
+      }catch(e){
+        document.body.removeChild(tmp);
+        return reject(e);
+      }
+      // Daj bibliotece chwilę na render
+      setTimeout(()=>{
+        try{
+          const canvas = tmp.querySelector("canvas");
+          let dataUrl;
+          if(canvas){
+            dataUrl = canvas.toDataURL("image/png");
+          } else {
+            const img = tmp.querySelector("img");
+            if(!img) throw new Error("QR: brak elementu wyjściowego.");
+            dataUrl = img.src;
+          }
+          document.body.removeChild(tmp);
+          resolve(dataUrl);
+        }catch(e){
+          document.body.removeChild(tmp);
+          reject(e);
+        }
+      }, 30);
+    });
+  }
+
+  // ---------- Generowanie ----------
+  async function generate(){
+    elStatus.textContent = "Generowanie…";
+    try{
+      const spec = readSpec();
+      const payload = JSON.stringify(compactPayload(spec));
+      const qrDataUrl = await buildQRDataUrl(payload);
+
+      elStudent.innerHTML = buildSheetSVG(spec, false, qrDataUrl);
+      elKey.innerHTML = buildSheetSVG(spec, true, qrDataUrl);
+      elStudent.classList.remove("hidden");
+      elKey.classList.remove("hidden");
+
+      btnPrintS.disabled = false;
+      btnPrintK.disabled = false;
+      btnPrintB.disabled = false;
+
+      elStatus.textContent = `Gotowe. Zadań: ${spec.tasks.length}. Payload QR: ${payload.length} znaków.`;
+    }catch(e){
+      elStatus.textContent = "Błąd: " + (e.message || e);
+    }
+  }
+
+  function printOnly(which){
+    const showS = which === "student" || which === "both";
+    const showK = which === "key" || which === "both";
+    elStudent.classList.toggle("hidden", !showS);
+    elKey.classList.toggle("hidden", !showK);
+    window.print();
+    // Po druku odsłaniamy oba
+    setTimeout(()=>{
+      elStudent.classList.remove("hidden");
+      elKey.classList.remove("hidden");
+    }, 100);
+  }
+
+  // ---------- Eventy ----------
+  document.getElementById("build").addEventListener("click", ()=>{
+    let n = parseInt(elTaskCount.value, 10);
+    if(Number.isNaN(n)) n = 13;
+    n = Math.max(1, Math.min(200, n));
+    elTaskCount.value = String(n);
+    buildTaskRows(n);
+    elStatus.textContent = `Utworzono ${n} zadań. Ustaw opcje/klucz i kliknij „Generuj".`;
+    btnPrintS.disabled = btnPrintK.disabled = btnPrintB.disabled = true;
+    elStudent.classList.add("hidden");
+    elKey.classList.add("hidden");
+  });
+
+  document.getElementById("generate").addEventListener("click", generate);
+  btnPrintS.addEventListener("click", ()=>printOnly("student"));
+  btnPrintK.addEventListener("click", ()=>printOnly("key"));
+  btnPrintB.addEventListener("click", ()=>printOnly("both"));
+
+  // Start
+  buildTaskRows(parseInt(elTaskCount.value, 10) || 13);
+</script>
+</body>
+</html>
