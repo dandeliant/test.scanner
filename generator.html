@@ -4,6 +4,16 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>Generator kart odpowiedzi + klucz + QR</title>
+<script>
+  (function authGuard(){
+    try{
+      var s = sessionStorage.getItem("ts_session_v1") || localStorage.getItem("ts_session_v1");
+      if(!s){ location.replace("index.html"); return; }
+      var o = JSON.parse(s);
+      if(!o || !o.user){ location.replace("index.html"); }
+    }catch(e){ location.replace("index.html"); }
+  })();
+</script>
 <style>
   :root{
     --ink:#111;
@@ -56,7 +66,13 @@
 </head>
 <body>
 <div class="ui">
-  <h1>Generator kart odpowiedzi + klucz + QR</h1>
+  <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;max-width:1200px">
+    <h1 style="margin:0">Generator kart odpowiedzi + klucz + QR</h1>
+    <div style="display:flex;gap:8px">
+      <a href="index.html" style="font:inherit;padding:8px 12px;border:1px solid #ccc;border-radius:10px;background:#fff;color:#111;text-decoration:none">Menu</a>
+      <button id="logoutBtn" type="button" style="background:#fff;color:#9b0020;border-color:#f0c8ce">Wyloguj</button>
+    </div>
+  </div>
 
   <div class="panel">
     <div class="row">
@@ -417,6 +433,13 @@
   btnPrintS.addEventListener("click", ()=>printOnly("student"));
   btnPrintK.addEventListener("click", ()=>printOnly("key"));
   btnPrintB.addEventListener("click", ()=>printOnly("both"));
+
+  // Wyloguj
+  document.getElementById("logoutBtn").addEventListener("click", ()=>{
+    sessionStorage.removeItem("ts_session_v1");
+    localStorage.removeItem("ts_session_v1");
+    location.replace("index.html");
+  });
 
   // Start
   buildTaskRows(parseInt(elTaskCount.value, 10) || 13);

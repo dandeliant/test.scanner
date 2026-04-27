@@ -4,6 +4,16 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>Skaner: QR + karta odpowiedzi</title>
+<script>
+  (function authGuard(){
+    try{
+      var s = sessionStorage.getItem("ts_session_v1") || localStorage.getItem("ts_session_v1");
+      if(!s){ location.replace("index.html"); return; }
+      var o = JSON.parse(s);
+      if(!o || !o.user){ location.replace("index.html"); }
+    }catch(e){ location.replace("index.html"); }
+  })();
+</script>
 <style>
   *{box-sizing:border-box}
   body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:16px;color:#111;background:#f3f3f3}
@@ -30,7 +40,13 @@
 </style>
 </head>
 <body>
-<h1>Skaner kart odpowiedzi</h1>
+<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;max-width:1000px">
+  <h1 style="margin:0 0 12px">Skaner kart odpowiedzi</h1>
+  <div style="display:flex;gap:8px">
+    <a href="index.html" style="font:inherit;padding:8px 12px;border:1px solid #ccc;border-radius:10px;background:#fff;color:#111;text-decoration:none">Menu</a>
+    <button id="logoutBtn" type="button" style="background:#fff;color:#9b0020;border-color:#f0c8ce;border-radius:12px;padding:9px 12px;cursor:pointer">Wyloguj</button>
+  </div>
+</div>
 
 <div class="panel">
   <div class="row" style="margin-bottom:6px">
@@ -522,6 +538,16 @@
   });
 
   btnStart.addEventListener("click", startCamera);
+
+  // Wyloguj
+  document.getElementById("logoutBtn").addEventListener("click", ()=>{
+    sessionStorage.removeItem("ts_session_v1");
+    localStorage.removeItem("ts_session_v1");
+    if(stream){
+      try{ stream.getTracks().forEach(t => t.stop()); }catch(e){}
+    }
+    location.replace("index.html");
+  });
 
   setStep(1);
 </script>

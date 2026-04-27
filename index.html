@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Test Scanner — logowanie</title>
+<style>
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0;
+    font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;
+    color:#111;
+    background:linear-gradient(135deg,#0f1117 0%,#1a1f2e 100%);
+    display:flex;align-items:center;justify-content:center;
+    padding:16px;
+  }
+  .card{
+    width:100%;max-width:420px;
+    background:#fff;border-radius:18px;
+    box-shadow:0 18px 60px rgba(0,0,0,.45);
+    padding:28px;
+  }
+  .brand{
+    display:flex;align-items:center;gap:10px;margin-bottom:18px
+  }
+  .logo{
+    width:40px;height:40px;border-radius:10px;background:#111;
+    display:flex;align-items:center;justify-content:center;color:#fff;
+    font-weight:800;font-size:20px;
+  }
+  .brand h1{margin:0;font-size:18px}
+  .brand .sub{font-size:12px;color:#666}
+  label{display:block;font-size:12px;color:#555;margin:14px 0 4px}
+  input{
+    width:100%;font:inherit;padding:10px 12px;
+    border:1px solid #ccc;border-radius:10px;background:#fff;
+  }
+  input:focus{outline:none;border-color:#111;box-shadow:0 0 0 3px rgba(17,17,17,.12)}
+  .row{display:flex;align-items:center;gap:8px;margin-top:14px}
+  .row label{margin:0;font-size:13px;color:#333}
+  .actions{margin-top:18px;display:flex;gap:8px}
+  button{
+    font:inherit;padding:11px 14px;border-radius:10px;border:1px solid #111;
+    background:#111;color:#fff;cursor:pointer;flex:1;font-weight:600
+  }
+  button.ghost{background:#fff;color:#111}
+  .err{
+    margin-top:14px;padding:10px 12px;border-radius:10px;
+    background:#ffe9ec;color:#9b0020;border:1px solid #ffc8d0;font-size:13px;
+    display:none;
+  }
+  .err.show{display:block}
+  .foot{margin-top:18px;text-align:center;font-size:11px;color:#888}
+  .ok-wrap{display:none}
+  .ok-wrap.show{display:block}
+  .login-wrap.hide{display:none}
+
+  .menu{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px}
+  .menu a{
+    text-decoration:none;color:#111;background:#f6f6f6;border:1px solid #e6e6e6;
+    border-radius:12px;padding:14px;display:block;text-align:center;font-weight:600;
+  }
+  .menu a:hover{background:#eee}
+  .who{font-size:13px;color:#444;margin-top:6px}
+  .logout{margin-top:14px;background:#fff;color:#9b0020;border-color:#f0c8ce}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="brand">
+    <div class="logo">TS</div>
+    <div>
+      <h1>Test Scanner</h1>
+      <div class="sub">Generator kart odpowiedzi + skaner OMR</div>
+    </div>
+  </div>
+
+  <!-- LOGOWANIE -->
+  <div id="loginWrap" class="login-wrap">
+    <form id="loginForm" autocomplete="off">
+      <label for="user">Login</label>
+      <input id="user" type="text" autocomplete="username" required />
+
+      <label for="pass">Hasło</label>
+      <input id="pass" type="password" autocomplete="current-password" required />
+
+      <div class="row">
+        <input id="remember" type="checkbox" style="width:auto" />
+        <label for="remember">Pamiętaj mnie na tym urządzeniu</label>
+      </div>
+
+      <div class="actions">
+        <button type="submit">Zaloguj</button>
+      </div>
+      <div id="err" class="err">Błędny login lub hasło.</div>
+    </form>
+  </div>
+
+  <!-- MENU PO ZALOGOWANIU -->
+  <div id="okWrap" class="ok-wrap">
+    <div class="who">Zalogowano jako <b id="whoName">—</b></div>
+    <div class="menu">
+      <a href="generator.html">Generator kart</a>
+      <a href="scanner.html">Skaner</a>
+    </div>
+    <button class="logout" id="logoutBtn">Wyloguj</button>
+  </div>
+
+  <div class="foot">© 2026 · Test Scanner</div>
+</div>
+
+<script>
+  // --- Konfiguracja autoryzacji ---
+  // UWAGA: to jest statyczna strona — nie traktuj tego jako prawdziwego zabezpieczenia.
+  // Hasło NIE jest przechowywane wprost. W kodzie jest skrót SHA-256 z solą.
+  const AUTH = {
+    user: "Daniel",
+    salt: "ts-scanner-2026",
+    // SHA-256( salt + "|" + hasło )
+    hash: "c390226af06932ab8bd85edb4c96d530786df06537ac169ea41fc741ec0c431b"
+  };
+
+  const SESSION_KEY = "ts_session_v1";
+
+  async function sha256Hex(text){
+    const enc = new TextEncoder().encode(text);
+    const buf = await crypto.subtle.digest("SHA-256", enc);
+    return Array.from(new Uint8Array(buf))
+      .map(b => b.toString(16).padStart(2,"0")).join("");
+  }
+
+  function getSession(){
+    try{
+      const a = sessionStorage.getItem(SESSION_KEY);
+      if(a) return JSON.parse(a);
+      const b = localStorage.getItem(SESSION_KEY);
+      if(b) return JSON.parse(b);
+    }catch(e){}
+    return null;
+  }
+
+  function setSession(payload, persist){
+    const s = JSON.stringify(payload);
+    sessionStorage.setItem(SESSION_KEY, s);
+    if(persist) localStorage.setItem(SESSION_KEY, s);
+    else localStorage.removeItem(SESSION_KEY);
+  }
+
+  function clearSession(){
+    sessionStorage.removeItem(SESSION_KEY);
+    localStorage.removeItem(SESSION_KEY);
+  }
+
+  // --- DOM ---
+  const loginWrap = document.getElementById("loginWrap");
+  const okWrap = document.getElementById("okWrap");
+  const whoName = document.getElementById("whoName");
+  const errBox = document.getElementById("err");
+  const userInp = document.getElementById("user");
+  const passInp = document.getElementById("pass");
+  const remember = document.getElementById("remember");
+
+  function showLogged(name){
+    whoName.textContent = name;
+    loginWrap.classList.add("hide");
+    okWrap.classList.add("show");
+  }
+  function showLogin(){
+    loginWrap.classList.remove("hide");
+    okWrap.classList.remove("show");
+    setTimeout(()=>userInp.focus(), 50);
+  }
+
+  // Auto-login jeśli sesja istnieje
+  (function init(){
+    const s = getSession();
+    if(s && s.user){
+      showLogged(s.user);
+    } else {
+      showLogin();
+    }
+  })();
+
+  document.getElementById("loginForm").addEventListener("submit", async (e)=>{
+    e.preventDefault();
+    errBox.classList.remove("show");
+    const u = userInp.value.trim();
+    const p = passInp.value;
+
+    if(u !== AUTH.user){
+      errBox.classList.add("show");
+      return;
+    }
+    const h = await sha256Hex(AUTH.salt + "|" + p);
+    if(h !== AUTH.hash){
+      errBox.classList.add("show");
+      return;
+    }
+
+    setSession({ user: u, ts: Date.now() }, remember.checked);
+    passInp.value = "";
+    showLogged(u);
+  });
+
+  document.getElementById("logoutBtn").addEventListener("click", ()=>{
+    clearSession();
+    showLogin();
+  });
+</script>
+</body>
+</html>
