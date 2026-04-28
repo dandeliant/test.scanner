@@ -13,6 +13,13 @@
       if(!o || !o.user){ location.replace("index.html"); }
     }catch(e){ location.replace("index.html"); }
   })();
+
+  // Globalny placeholder — definiowany OD RAZU. Główny skrypt nadpisze go
+  // właściwą logiką. Dzięki temu inline onclick zawsze coś robi, nawet
+  // jeśli główny skrypt padnie.
+  window._tsClickCam = function(){
+    alert("KLIK ZAREJESTROWANY (placeholder).\n\nGłówny skrypt jeszcze się nie załadował lub padł.\nAdres: " + location.href + "\nProtokół: " + location.protocol + "\nSecure: " + window.isSecureContext);
+  };
 </script>
 <style>
   *{box-sizing:border-box}
@@ -84,7 +91,7 @@
     <span class="step" id="step3">3. Karta ucznia</span>
   </div>
   <div class="row">
-    <button id="startCam" class="primary">Włącz kamerę</button>
+    <button id="startCam" class="primary" onclick="window._tsClickCam && window._tsClickCam()">Włącz kamerę</button>
     <button id="scanQR" disabled>Skanuj QR (klucz)</button>
     <button id="scanSheet" disabled>Skanuj kartę ucznia</button>
     <button id="reset">Reset</button>
@@ -227,13 +234,20 @@
     ` · jsQR=${typeof jsQR !== "undefined"}`;
   logInfo("DOM podpięty. Diagnostyka:", diagBox.textContent);
 
-  // KRYTYCZNE: Podpinamy handlery od razu po pobraniu elementów,
-  // żeby ew. błąd dalej w skrypcie nie zostawił "martwych" przycisków.
-  btnStart.addEventListener("click", function(){
-    logInfo("==> KLIK: Włącz kamerę");
+  // KRYTYCZNE: nadpisujemy globalny _tsClickCam właściwą funkcją.
+  // Inline onclick na <button> wywołuje window._tsClickCam — to jest
+  // niezawodne i nie zależy od tego czy addEventListener się powiódł.
+  window._tsClickCam = function(){
+    logInfo("==> KLIK: Włącz kamerę (przez inline onclick)");
     try{ startCamera(); }
     catch(e){ logErr("startCamera throw:", e); showErrBanner("Błąd: " + (e.message||e)); }
-  });
+  };
+  // Dla pewności DODATKOWO addEventListener — gdyby coś z onclick zawodziło.
+  try{
+    btnStart.addEventListener("click", function(){
+      logInfo("==> KLIK (addEventListener): Włącz kamerę");
+    });
+  }catch(_){}
   document.getElementById("logoutBtn").addEventListener("click", ()=>{
     sessionStorage.removeItem("ts_session_v1");
     localStorage.removeItem("ts_session_v1");
@@ -305,7 +319,7 @@
         : (!window.isSecureContext
             ? "Brak HTTPS / localhost — przeglądarki blokują kamerę."
             : "Twoja przeglądarka nie wspiera getUserMedia.");
-      showErrBanner(why + " — użyj „Wgraj zdjęcie QR".");
+      showErrBanner(why + ' — użyj „Wgraj zdjęcie QR".');
       return;
     }
     try{
@@ -414,7 +428,7 @@
 
   async function scanQRLoop(){
     if(!stream){
-      setStatus("Kamera nieaktywna. Włącz kamerę albo użyj „Wgraj zdjęcie QR".");
+      setStatus('Kamera nieaktywna. Włącz kamerę albo użyj „Wgraj zdjęcie QR".');
       return;
     }
     setStatus("Szukam QR… trzymaj kod w kadrze.");
@@ -750,7 +764,7 @@
 
   btnSheet.addEventListener("click", async ()=>{
     try{
-      if(!stream) throw new Error("Kamera nieaktywna. Włącz kamerę albo użyj „Wgraj zdjęcie karty".");
+      if(!stream) throw new Error('Kamera nieaktywna. Włącz kamerę albo użyj „Wgraj zdjęcie karty".');
       setStatus("Skanuję kartę… trzymaj kartkę prostopadle, w równym świetle.");
       await new Promise(r => setTimeout(r, 120));
       snap();
