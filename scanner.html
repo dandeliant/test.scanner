@@ -115,16 +115,16 @@
   </div>
 </div>
 
-<div class="panel hidden" id="debugPanel">
+<div class="panel" id="debugPanel" style="border:3px solid #ffb000">
   <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
-    <div><b>Podgląd debug</b> <span class="muted" id="debugMeta"></span></div>
-    <button type="button" id="hideDebugBtn">Ukryj</button>
+    <div><b style="font-size:16px">🔍 Podgląd debug</b> <span class="muted" id="debugMeta">— pojawi się po skanie karty</span></div>
   </div>
   <div class="muted" style="margin-bottom:8px">
     Zielona ramka = algorytm uznał kratkę za zaznaczoną. Czerwona = pusta.
     Liczby pod ramkami to fill ratio (powyżej progu = zaznaczone).
   </div>
-  <canvas id="debugCanvas" style="width:100%;max-width:760px;border:2px solid #111;border-radius:10px;background:#fff;display:block"></canvas>
+  <canvas id="debugCanvas" width="600" height="200" style="width:100%;max-width:760px;border:2px solid #111;border-radius:10px;background:#fff;display:block"></canvas>
+  <div id="debugFallback" style="display:none;margin-top:8px"></div>
 </div>
 
 <div class="panel">
@@ -680,51 +680,87 @@
       });
     }
 
-    // Debug — ZAWSZE rysujemy + ZAWSZE pokazujemy panel po skanie.
+    // Debug — bez try/catch, żeby błąd byl widoczny w czerwonym banerze
+    logInfo("DEBUG: rysuję, warp =", warped.cols + "x" + warped.rows);
+    dbgCanvas.width = warped.cols;
+    dbgCanvas.height = warped.rows;
+    logInfo("DEBUG: dbgCanvas.width =", dbgCanvas.width, "height =", dbgCanvas.height);
+
+    // Próbujemy dwa sposoby: cv.imshow + fallback przez putImageData
+    let drawnOk = false;
     try{
-      logInfo("Rysuję podgląd debug, warp =", warped.cols + "x" + warped.rows);
-      dbgCanvas.width = warped.cols;
-      dbgCanvas.height = warped.rows;
       cv.imshow(dbgCanvas, warped);
-
-      dbgCtx.lineWidth = 2;
-      dbgCtx.font = "16px system-ui";
-      dbgCtx.fillStyle = "rgba(0,0,0,0.78)";
-      dbgCtx.fillRect(8, 8, 540, 36);
-      dbgCtx.fillStyle = "white";
-      dbgCtx.fillText(`próg=${ratioThr.toFixed(3)} · mediana=${median.toFixed(3)} · ${warped.cols}x${warped.rows}`, 16, 32);
-
-      for(let i=0;i<taskCount;i++){
-        const info = cellInfo[i];
-        if(!info) continue;
-        for(let j=0;j<info.ratios.length;j++){
-          const r = info.ratios[j];
-          const isF = r > ratioThr;
-          const {cx, cy} = info.centers[j];
-          dbgCtx.strokeStyle = isF ? "rgba(0,200,0,0.95)" : "rgba(220,40,40,0.7)";
-          dbgCtx.lineWidth = isF ? 3 : 2;
-          dbgCtx.strokeRect(cx - L.bubbleSize/2, cy - L.bubbleSize/2, L.bubbleSize, L.bubbleSize);
-          dbgCtx.fillStyle = "rgba(0,0,0,0.7)";
-          dbgCtx.fillRect(cx - 18, cy - L.bubbleSize/2 - 16, 36, 14);
-          dbgCtx.fillStyle = "white";
-          dbgCtx.font = "11px system-ui";
-          dbgCtx.fillText(r.toFixed(2), cx - 14, cy - L.bubbleSize/2 - 4);
-        }
-      }
-      // Pokaż panel debug i przewiń do niego
-      const panel = document.getElementById("debugPanel");
-      const meta = document.getElementById("debugMeta");
-      if(meta) meta.textContent = `(warp ${warped.cols}×${warped.rows}, próg ${ratioThr.toFixed(3)})`;
-      if(panel){
-        panel.classList.remove("hidden");
-        // Przewiń lekko z opóźnieniem żeby canvas zdążył się ułożyć
-        setTimeout(()=> panel.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
-      }
-      window.__ts_lastDebugReady = true;
-      logOk("Debug podgląd narysowany.");
-    }catch(e){
-      logErr("debug render error:", e && (e.message || e));
+      drawnOk = true;
+      logOk("DEBUG: cv.imshow OK");
+    }catch(e1){
+      logErr("DEBUG: cv.imshow failed:", e1 && (e1.message || e1));
     }
+    if(!drawnOk){
+      try{
+        // Fallback: ręcznie konwertuj Mat -> ImageData
+        const rgba = new cv.Mat();
+        cv.cvtColor(warped, rgba, cv.COLOR_RGBA2RGBA);
+        const imgData = new ImageData(new Uint8ClampedArray(rgba.data), rgba.cols, rgba.rows);
+        dbgCtx.putImageData(imgData, 0, 0);
+        rgba.delete();
+        drawnOk = true;
+        logOk("DEBUG: fallback putImageData OK");
+      }catch(e2){
+        logErr("DEBUG: fallback failed:", e2 && (e2.message || e2));
+      }
+    }
+
+    // Nakładki — ramki i fill ratio
+    dbgCtx.lineWidth = 2;
+    dbgCtx.font = "16px system-ui";
+    dbgCtx.fillStyle = "rgba(0,0,0,0.78)";
+    dbgCtx.fillRect(8, 8, 540, 36);
+    dbgCtx.fillStyle = "white";
+    dbgCtx.fillText(`próg=${ratioThr.toFixed(3)} · mediana=${median.toFixed(3)} · ${warped.cols}x${warped.rows}`, 16, 32);
+
+    for(let i=0;i<taskCount;i++){
+      const info = cellInfo[i];
+      if(!info) continue;
+      for(let j=0;j<info.ratios.length;j++){
+        const r = info.ratios[j];
+        const isF = r > ratioThr;
+        const {cx, cy} = info.centers[j];
+        dbgCtx.strokeStyle = isF ? "rgba(0,200,0,0.95)" : "rgba(220,40,40,0.85)";
+        dbgCtx.lineWidth = isF ? 4 : 2;
+        dbgCtx.strokeRect(cx - L.bubbleSize/2, cy - L.bubbleSize/2, L.bubbleSize, L.bubbleSize);
+        dbgCtx.fillStyle = "rgba(0,0,0,0.7)";
+        dbgCtx.fillRect(cx - 18, cy - L.bubbleSize/2 - 16, 36, 14);
+        dbgCtx.fillStyle = "white";
+        dbgCtx.font = "11px system-ui";
+        dbgCtx.fillText(r.toFixed(2), cx - 14, cy - L.bubbleSize/2 - 4);
+      }
+    }
+
+    // Aktualizuj meta + scroll
+    const meta = document.getElementById("debugMeta");
+    if(meta) meta.textContent = `(warp ${warped.cols}×${warped.rows}, próg ${ratioThr.toFixed(3)})`;
+    const panel = document.getElementById("debugPanel");
+    if(panel){
+      panel.classList.remove("hidden");
+      setTimeout(()=> panel.scrollIntoView({ behavior: "smooth", block: "start" }), 80);
+    }
+
+    // Fallback: jeśli rysowanie zawiodło, pokaż obraz przez data URL
+    const fb = document.getElementById("debugFallback");
+    if(fb){
+      if(!drawnOk){
+        try{
+          const dataUrl = dbgCanvas.toDataURL("image/png");
+          fb.innerHTML = `<div class="muted" style="margin-bottom:6px">Fallback: poniżej obraz jako PNG (jeśli canvas pusty).</div><img src="${dataUrl}" style="max-width:100%;border:1px solid #ccc;border-radius:6px"/>`;
+          fb.style.display = "block";
+        }catch(_){}
+      } else {
+        fb.style.display = "none";
+        fb.innerHTML = "";
+      }
+    }
+    window.__ts_lastDebugReady = true;
+    logOk("DEBUG: gotowe (drawnOk=" + drawnOk + ")");
 
     thr.delete();
     return answers;
@@ -824,31 +860,36 @@
     resultEl.textContent = "";
     btnSheet.disabled = true;
     btnUploadSheet.disabled = true;
-    const _dp = document.getElementById("debugPanel");
-    if(_dp) _dp.classList.add("hidden");
     window.__ts_lastDebugReady = false;
+    // Resetuj canvas debug do placeholdera
+    try{
+      dbgCanvas.width = 600; dbgCanvas.height = 200;
+      dbgCtx.fillStyle = "#fafafa";
+      dbgCtx.fillRect(0, 0, dbgCanvas.width, dbgCanvas.height);
+      dbgCtx.fillStyle = "#888";
+      dbgCtx.font = "16px system-ui";
+      dbgCtx.textAlign = "center";
+      dbgCtx.fillText("Tu pojawi się warp + ramki kratek po skanie karty.", dbgCanvas.width/2, dbgCanvas.height/2);
+      dbgCtx.textAlign = "start";
+      const meta = document.getElementById("debugMeta");
+      if(meta) meta.textContent = "— pojawi się po skanie karty";
+    }catch(_){}
     setStep(stream ? 2 : 1);
     setStatus(stream ? "Reset. Zeskanuj QR ponownie." : "Reset. Włącz kamerę albo wgraj QR z dysku.");
   });
 
-  // Przycisk "Ukryj" w panelu debug
-  const _hideDebugBtn = document.getElementById("hideDebugBtn");
-  if(_hideDebugBtn){
-    _hideDebugBtn.addEventListener("click", ()=>{
-      const panel = document.getElementById("debugPanel");
-      if(panel) panel.classList.add("hidden");
-    });
-  }
-  // Stary checkbox: jeżeli zaznaczony przed skanem nic nie zmienia (i tak pokażemy),
-  // ale jak ktoś go odznaczy, ukrywamy panel.
-  debugToggle.addEventListener("change", ()=>{
-    if(!window.__ts_lastDebugReady && debugToggle.checked){
-      setStatus("Debug pojawi się automatycznie po zeskanowaniu karty.");
-      return;
-    }
-    const panel = document.getElementById("debugPanel");
-    if(panel) panel.classList.toggle("hidden", !debugToggle.checked);
-  });
+  // Placeholder na canvasie debug
+  (function initDebugPlaceholder(){
+    try{
+      dbgCtx.fillStyle = "#fafafa";
+      dbgCtx.fillRect(0, 0, dbgCanvas.width, dbgCanvas.height);
+      dbgCtx.fillStyle = "#888";
+      dbgCtx.font = "16px system-ui";
+      dbgCtx.textAlign = "center";
+      dbgCtx.fillText("Tu pojawi się warp + ramki kratek po skanie karty.", dbgCanvas.width/2, dbgCanvas.height/2);
+      dbgCtx.textAlign = "start";
+    }catch(_){}
+  })();
 
   setStep(1);
   logOk("Inicjalizacja zakończona — wszystkie handlery podpięte.");
