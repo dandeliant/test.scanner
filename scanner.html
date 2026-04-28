@@ -669,19 +669,19 @@
       });
     }
 
-    // Debug: pokaż warp + zaznaczone kratki
-    if(debugToggle.checked){
-      dbgCanvas.classList.remove("hidden");
+    // Debug: ZAWSZE rysujemy warp + nakładki — checkbox tylko steruje widocznością.
+    // Dzięki temu można zaznaczyć Debug DOPIERO po skanie i od razu zobaczyć wynik.
+    try{
       dbgCanvas.width = warped.cols;
       dbgCanvas.height = warped.rows;
       cv.imshow(dbgCanvas, warped);
 
       dbgCtx.lineWidth = 2;
-      dbgCtx.font = "12px system-ui";
-      dbgCtx.fillStyle = "rgba(0,0,0,0.7)";
-      dbgCtx.fillRect(8, 8, 360, 28);
+      dbgCtx.font = "14px system-ui";
+      dbgCtx.fillStyle = "rgba(0,0,0,0.75)";
+      dbgCtx.fillRect(8, 8, 480, 32);
       dbgCtx.fillStyle = "white";
-      dbgCtx.fillText(`ratioThr=${ratioThr.toFixed(3)} | mediana=${median.toFixed(3)}`, 16, 26);
+      dbgCtx.fillText(`ratioThr=${ratioThr.toFixed(3)} | mediana=${median.toFixed(3)} | ROZMIAR ${warped.cols}x${warped.rows}`, 16, 30);
 
       for(let i=0;i<taskCount;i++){
         const info = cellInfo[i];
@@ -690,16 +690,21 @@
           const r = info.ratios[j];
           const isF = r > ratioThr;
           const {cx, cy} = info.centers[j];
-          dbgCtx.strokeStyle = isF ? "rgba(0,160,0,0.95)" : "rgba(220,40,40,0.6)";
+          dbgCtx.strokeStyle = isF ? "rgba(0,200,0,0.95)" : "rgba(220,40,40,0.6)";
+          dbgCtx.lineWidth = isF ? 3 : 2;
           dbgCtx.strokeRect(cx - L.bubbleSize/2, cy - L.bubbleSize/2, L.bubbleSize, L.bubbleSize);
-          dbgCtx.fillStyle = "rgba(0,0,0,0.6)";
-          dbgCtx.fillRect(cx - 18, cy - L.bubbleSize/2 - 14, 36, 12);
+          dbgCtx.fillStyle = "rgba(0,0,0,0.65)";
+          dbgCtx.fillRect(cx - 18, cy - L.bubbleSize/2 - 16, 36, 14);
           dbgCtx.fillStyle = "white";
+          dbgCtx.font = "11px system-ui";
           dbgCtx.fillText(r.toFixed(2), cx - 14, cy - L.bubbleSize/2 - 4);
         }
       }
-    } else {
-      dbgCanvas.classList.add("hidden");
+      // Stan widoczności sterowany przez checkbox
+      dbgCanvas.classList.toggle("hidden", !debugToggle.checked);
+      window.__ts_lastDebugReady = true;
+    }catch(e){
+      logErr("debug render error:", e);
     }
 
     thr.delete();
@@ -803,6 +808,18 @@
     dbgCanvas.classList.add("hidden");
     setStep(stream ? 2 : 1);
     setStatus(stream ? "Reset. Zeskanuj QR ponownie." : "Reset. Włącz kamerę albo wgraj QR z dysku.");
+  });
+
+  // Debug toggle — pokazuje/ukrywa ostatni warp
+  debugToggle.addEventListener("change", ()=>{
+    if(window.__ts_lastDebugReady){
+      dbgCanvas.classList.toggle("hidden", !debugToggle.checked);
+      logInfo("Debug:", debugToggle.checked ? "pokazany" : "ukryty");
+    } else {
+      if(debugToggle.checked){
+        setStatus("Najpierw zeskanuj kartę — debug pojawi się po skanowaniu.");
+      }
+    }
   });
 
   setStep(1);
