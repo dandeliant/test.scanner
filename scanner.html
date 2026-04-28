@@ -792,15 +792,22 @@
 
   // ---------- Skan karty ----------
   function processSheetFromCanvas(){
-    if(!spec) throw new Error("Najpierw zeskanuj QR z kluczem.");
-    if(!cvReady) throw new Error("OpenCV jeszcze się ładuje, spróbuj za chwilę.");
+    logInfo("PROCESS: start");
+    if(!spec){ logErr("PROCESS: brak spec (QR)"); throw new Error("Najpierw zeskanuj QR z kluczem."); }
+    if(!cvReady){ logErr("PROCESS: cv niegotowy"); throw new Error("OpenCV jeszcze się ładuje, spróbuj za chwilę."); }
 
+    logInfo("PROCESS: cv.imread");
     const src = cv.imread(canvas);
+    logInfo("PROCESS: src =", src.cols + "x" + src.rows);
     let warped = null;
     try{
+      logInfo("PROCESS: findCornerMarkers");
       const corners = findCornerMarkers(src);
+      logOk("PROCESS: markery OK", JSON.stringify(corners));
       warped = warpToCanonical(src, corners);
+      logOk("PROCESS: warp OK", warped.cols + "x" + warped.rows);
       const answers = readAnswers(warped, spec);
+      logOk("PROCESS: readAnswers OK, odpowiedzi:", answers.length);
       const score = grade(answers, spec);
 
       const lines = [];
@@ -823,14 +830,22 @@
   }
 
   btnSheet.addEventListener("click", async ()=>{
+    logInfo("==> KLIK: Skanuj kartę ucznia");
     try{
+      logInfo("SCAN: stream=", !!stream, "spec=", !!spec, "cvReady=", cvReady);
       if(!stream) throw new Error('Kamera nieaktywna. Włącz kamerę albo użyj „Wgraj zdjęcie karty".');
       setStatus("Skanuję kartę… trzymaj kartkę prostopadle, w równym świetle.");
       await new Promise(r => setTimeout(r, 120));
+      logInfo("SCAN: robię snap()");
       snap();
+      logInfo("SCAN: snap() OK, canvas =", canvas.width + "x" + canvas.height);
+      logInfo("SCAN: wywołuję processSheetFromCanvas()");
       processSheetFromCanvas();
+      logOk("SCAN: zakończony.");
     }catch(e){
+      logErr("SCAN error:", e && (e.message || e));
       setStatus("Błąd OMR: " + (e.message || e));
+      showErrBanner("Błąd OMR: " + (e.message || e));
     }
   });
 
