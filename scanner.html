@@ -112,8 +112,19 @@
   <div class="grid" style="margin-top:10px">
     <video id="video" playsinline muted></video>
     <canvas id="canvas" class="hidden"></canvas>
-    <canvas id="debugCanvas" class="hidden"></canvas>
   </div>
+</div>
+
+<div class="panel hidden" id="debugPanel">
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+    <div><b>Podgląd debug</b> <span class="muted" id="debugMeta"></span></div>
+    <button type="button" id="hideDebugBtn">Ukryj</button>
+  </div>
+  <div class="muted" style="margin-bottom:8px">
+    Zielona ramka = algorytm uznał kratkę za zaznaczoną. Czerwona = pusta.
+    Liczby pod ramkami to fill ratio (powyżej progu = zaznaczone).
+  </div>
+  <canvas id="debugCanvas" style="width:100%;max-width:760px;border:2px solid #111;border-radius:10px;background:#fff;display:block"></canvas>
 </div>
 
 <div class="panel">
@@ -669,19 +680,19 @@
       });
     }
 
-    // Debug: ZAWSZE rysujemy warp + nakładki — checkbox tylko steruje widocznością.
-    // Dzięki temu można zaznaczyć Debug DOPIERO po skanie i od razu zobaczyć wynik.
+    // Debug — ZAWSZE rysujemy + ZAWSZE pokazujemy panel po skanie.
     try{
+      logInfo("Rysuję podgląd debug, warp =", warped.cols + "x" + warped.rows);
       dbgCanvas.width = warped.cols;
       dbgCanvas.height = warped.rows;
       cv.imshow(dbgCanvas, warped);
 
       dbgCtx.lineWidth = 2;
-      dbgCtx.font = "14px system-ui";
-      dbgCtx.fillStyle = "rgba(0,0,0,0.75)";
-      dbgCtx.fillRect(8, 8, 480, 32);
+      dbgCtx.font = "16px system-ui";
+      dbgCtx.fillStyle = "rgba(0,0,0,0.78)";
+      dbgCtx.fillRect(8, 8, 540, 36);
       dbgCtx.fillStyle = "white";
-      dbgCtx.fillText(`ratioThr=${ratioThr.toFixed(3)} | mediana=${median.toFixed(3)} | ROZMIAR ${warped.cols}x${warped.rows}`, 16, 30);
+      dbgCtx.fillText(`próg=${ratioThr.toFixed(3)} · mediana=${median.toFixed(3)} · ${warped.cols}x${warped.rows}`, 16, 32);
 
       for(let i=0;i<taskCount;i++){
         const info = cellInfo[i];
@@ -690,21 +701,29 @@
           const r = info.ratios[j];
           const isF = r > ratioThr;
           const {cx, cy} = info.centers[j];
-          dbgCtx.strokeStyle = isF ? "rgba(0,200,0,0.95)" : "rgba(220,40,40,0.6)";
+          dbgCtx.strokeStyle = isF ? "rgba(0,200,0,0.95)" : "rgba(220,40,40,0.7)";
           dbgCtx.lineWidth = isF ? 3 : 2;
           dbgCtx.strokeRect(cx - L.bubbleSize/2, cy - L.bubbleSize/2, L.bubbleSize, L.bubbleSize);
-          dbgCtx.fillStyle = "rgba(0,0,0,0.65)";
+          dbgCtx.fillStyle = "rgba(0,0,0,0.7)";
           dbgCtx.fillRect(cx - 18, cy - L.bubbleSize/2 - 16, 36, 14);
           dbgCtx.fillStyle = "white";
           dbgCtx.font = "11px system-ui";
           dbgCtx.fillText(r.toFixed(2), cx - 14, cy - L.bubbleSize/2 - 4);
         }
       }
-      // Stan widoczności sterowany przez checkbox
-      dbgCanvas.classList.toggle("hidden", !debugToggle.checked);
+      // Pokaż panel debug i przewiń do niego
+      const panel = document.getElementById("debugPanel");
+      const meta = document.getElementById("debugMeta");
+      if(meta) meta.textContent = `(warp ${warped.cols}×${warped.rows}, próg ${ratioThr.toFixed(3)})`;
+      if(panel){
+        panel.classList.remove("hidden");
+        // Przewiń lekko z opóźnieniem żeby canvas zdążył się ułożyć
+        setTimeout(()=> panel.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
+      }
       window.__ts_lastDebugReady = true;
+      logOk("Debug podgląd narysowany.");
     }catch(e){
-      logErr("debug render error:", e);
+      logErr("debug render error:", e && (e.message || e));
     }
 
     thr.delete();
@@ -805,21 +824,30 @@
     resultEl.textContent = "";
     btnSheet.disabled = true;
     btnUploadSheet.disabled = true;
-    dbgCanvas.classList.add("hidden");
+    const _dp = document.getElementById("debugPanel");
+    if(_dp) _dp.classList.add("hidden");
+    window.__ts_lastDebugReady = false;
     setStep(stream ? 2 : 1);
     setStatus(stream ? "Reset. Zeskanuj QR ponownie." : "Reset. Włącz kamerę albo wgraj QR z dysku.");
   });
 
-  // Debug toggle — pokazuje/ukrywa ostatni warp
+  // Przycisk "Ukryj" w panelu debug
+  const _hideDebugBtn = document.getElementById("hideDebugBtn");
+  if(_hideDebugBtn){
+    _hideDebugBtn.addEventListener("click", ()=>{
+      const panel = document.getElementById("debugPanel");
+      if(panel) panel.classList.add("hidden");
+    });
+  }
+  // Stary checkbox: jeżeli zaznaczony przed skanem nic nie zmienia (i tak pokażemy),
+  // ale jak ktoś go odznaczy, ukrywamy panel.
   debugToggle.addEventListener("change", ()=>{
-    if(window.__ts_lastDebugReady){
-      dbgCanvas.classList.toggle("hidden", !debugToggle.checked);
-      logInfo("Debug:", debugToggle.checked ? "pokazany" : "ukryty");
-    } else {
-      if(debugToggle.checked){
-        setStatus("Najpierw zeskanuj kartę — debug pojawi się po skanowaniu.");
-      }
+    if(!window.__ts_lastDebugReady && debugToggle.checked){
+      setStatus("Debug pojawi się automatycznie po zeskanowaniu karty.");
+      return;
     }
+    const panel = document.getElementById("debugPanel");
+    if(panel) panel.classList.toggle("hidden", !debugToggle.checked);
   });
 
   setStep(1);
