@@ -516,6 +516,22 @@
 
   // ---------- Markery rogów ----------
   function findCornerMarkers(srcRGBA){
+    // Próbuj kilku strategii progowania — pierwsza która zwróci 4 markery wygrywa.
+    const strategies = ["otsu", "adaptive21", "adaptive41", "fixed110", "fixed90"];
+    let lastErr = null;
+    for(const s of strategies){
+      try{
+        const r = findCornerMarkersWith(srcRGBA, s);
+        if(r){
+          logInfo("MARKERS: znalezione strategią", s);
+          return r;
+        }
+      }catch(e){ lastErr = e; }
+    }
+    throw lastErr || new Error("Nie wykryto 4 markerów (próbowane wszystkie strategie progowania).");
+  }
+
+  function findCornerMarkersWith(srcRGBA, strategy){
     const w = srcRGBA.cols, h = srcRGBA.rows;
 
     const gray = new cv.Mat();
@@ -525,8 +541,17 @@
     cv.GaussianBlur(gray, blur, new cv.Size(5,5), 0);
 
     const thr = new cv.Mat();
-    // Otsu inwersja (czarne markery -> białe blob-y)
-    cv.threshold(blur, thr, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU);
+    if(strategy === "otsu"){
+      cv.threshold(blur, thr, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU);
+    } else if(strategy === "adaptive21"){
+      cv.adaptiveThreshold(blur, thr, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY_INV, 21, 7);
+    } else if(strategy === "adaptive41"){
+      cv.adaptiveThreshold(blur, thr, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY_INV, 41, 10);
+    } else if(strategy === "fixed110"){
+      cv.threshold(blur, thr, 110, 255, cv.THRESH_BINARY_INV);
+    } else if(strategy === "fixed90"){
+      cv.threshold(blur, thr, 90, 255, cv.THRESH_BINARY_INV);
+    }
 
     const contours = new cv.MatVector();
     const hierarchy = new cv.Mat();
@@ -577,13 +602,26 @@
     const bl = pick(buckets.bl);
 
     if(!tl || !tr || !br || !bl){
-      const miss = [];
-      if(!tl) miss.push("góra-lewo");
-      if(!tr) miss.push("góra-prawo");
-      if(!br) miss.push("dół-prawo");
-      if(!bl) miss.push("dół-lewo");
-      throw new Error("Nie wykryto markerów: " + miss.join(", ") + ". Popraw kadr/światło, trzymaj kartkę prostopadle.");
+      return null; // pętla strategii spróbuje innej metody
     }
+
+    // Walidacja geometrii: 4 punkty powinny formować w miarę prostokąt
+    // (boki nie za krótkie, przekątne podobnej długości).
+    const dist = (a,b)=> Math.hypot(a.x-b.x, a.y-b.y);
+    const top = dist(tl, tr);
+    const bot = dist(bl, br);
+    const left = dist(tl, bl);
+    const right = dist(tr, br);
+    const minSide = Math.min(top, bot, left, right);
+    const maxSide = Math.max(top, bot, left, right);
+    // Boki przeciwległe powinny być podobnej długości (do 35% różnicy)
+    if(Math.abs(top - bot) / Math.max(top,bot) > 0.35) return null;
+    if(Math.abs(left - right) / Math.max(left,right) > 0.35) return null;
+    // Karta nie może być mikroskopijna w kadrze
+    if(minSide < Math.min(w,h) * 0.15) return null;
+    // Stosunek bok krótszy / dłuższy nie może być ekstremalny (ucięta strona)
+    if(minSide / maxSide < 0.4) return null;
+
     return [tl, tr, br, bl];
   }
 
@@ -874,21 +912,44 @@
 
   btnSheet.addEventListener("click", async ()=>{
     logInfo("==> KLIK: Skanuj kartę ucznia");
+    if(!stream){
+      const msg = 'Kamera nieaktywna. Włącz kamerę albo użyj „Wgraj zdjęcie karty".';
+      setStatus(msg); showErrBanner(msg); return;
+    }
+    if(!spec){ setStatus("Najpierw zeskanuj QR z kluczem."); return; }
+    if(!cvReady){ setStatus("OpenCV jeszcze się ładuje, spróbuj za chwilę."); return; }
+
+    btnSheet.disabled = true;
+    const oldText = btnSheet.textContent;
+    const MAX_ATTEMPTS = 8;
+    let lastError = null;
     try{
-      logInfo("SCAN: stream=", !!stream, "spec=", !!spec, "cvReady=", cvReady);
-      if(!stream) throw new Error('Kamera nieaktywna. Włącz kamerę albo użyj „Wgraj zdjęcie karty".');
-      setStatus("Skanuję kartę… trzymaj kartkę prostopadle, w równym świetle.");
-      await new Promise(r => setTimeout(r, 120));
-      logInfo("SCAN: robię snap()");
-      snap();
-      logInfo("SCAN: snap() OK, canvas =", canvas.width + "x" + canvas.height);
-      logInfo("SCAN: wywołuję processSheetFromCanvas()");
-      processSheetFromCanvas();
-      logOk("SCAN: zakończony.");
-    }catch(e){
-      logErr("SCAN error:", e && (e.message || e));
-      setStatus("Błąd OMR: " + (e.message || e));
-      showErrBanner("Błąd OMR: " + (e.message || e));
+      for(let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++){
+        btnSheet.textContent = `Szukam… (${attempt}/${MAX_ATTEMPTS})`;
+        setStatus(`Szukam karty… próba ${attempt}/${MAX_ATTEMPTS} — trzymaj kartkę nieruchomo.`);
+        try{
+          snap();
+          logInfo(`SCAN: próba ${attempt} — canvas ${canvas.width}x${canvas.height}`);
+          processSheetFromCanvas();
+          logOk(`SCAN: SUKCES na próbie ${attempt}.`);
+          return; // success — koniec
+        }catch(e){
+          lastError = e;
+          logInfo(`SCAN: próba ${attempt} - ${e.message || e}`);
+          // Krótka przerwa zanim spróbujemy znowu (czas na refocus)
+          await new Promise(r => setTimeout(r, 220));
+        }
+      }
+      const msg = "Nie udało się wykryć karty po " + MAX_ATTEMPTS + " próbach. " +
+                  "Wskazówki: lepsze światło (włącz latarkę), kartka prostopadle do kamery, " +
+                  "wszystkie 4 czarne kwadraty w kadrze, brak rozmycia. " +
+                  "Ostatni błąd: " + (lastError?.message || "nieznany");
+      setStatus(msg);
+      showErrBanner(msg);
+      logErr("SCAN: wszystkie próby nieudane.");
+    } finally {
+      btnSheet.disabled = false;
+      btnSheet.textContent = oldText;
     }
   });
 
