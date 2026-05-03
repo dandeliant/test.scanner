@@ -90,29 +90,35 @@
     <span class="step" id="step2">2. QR (klucz)</span>
     <span class="step" id="step3">3. Karta ucznia</span>
   </div>
-  <div class="row">
+  <div id="status" style="margin-top:8px;padding:8px 10px;background:#eef3ff;border:1px solid #cdd9f5;border-radius:8px;color:#0a2a6b;font-size:14px;font-weight:500">Gotowy. Włącz kamerę albo wgraj zdjęcie.</div>
+  <div id="warnBox" class="warn hidden"></div>
+
+  <div class="grid" style="margin-top:10px">
+    <video id="video" playsinline muted></video>
+    <canvas id="canvas" class="hidden"></canvas>
+  </div>
+
+  <!-- Główne przyciski TUŻ POD KAMERĄ -->
+  <div class="row" style="margin-top:10px;gap:8px">
     <button id="startCam" class="primary" onclick="window._tsClickCam && window._tsClickCam()">Włącz kamerę</button>
+    <button id="torchBtn" type="button" hidden>💡 Latarka</button>
     <button id="scanQR" disabled>Skanuj QR (klucz)</button>
     <button id="scanSheet" disabled>Skanuj kartę ucznia</button>
     <button id="reset">Reset</button>
-    <span class="chip"><input id="debug" type="checkbox" /><label for="debug">Debug (podgląd warpu)</label></span>
   </div>
+
+  <!-- Drugi rząd: upload -->
   <div class="row" style="margin-top:8px">
     <span class="muted">Bez kamery? Wgraj zdjęcie:</span>
     <button type="button" class="upload-btn" id="btnUploadQR">Wgraj zdjęcie QR</button>
     <button type="button" class="upload-btn" id="btnUploadSheet" disabled>Wgraj zdjęcie karty</button>
     <input id="fileQR" type="file" accept="image/*" style="position:absolute;left:-9999px;width:1px;height:1px;opacity:0" />
     <input id="fileSheet" type="file" accept="image/*" style="position:absolute;left:-9999px;width:1px;height:1px;opacity:0" />
+    <span class="chip" style="margin-left:auto"><input id="debug" type="checkbox" /><label for="debug">Debug (legacy toggle)</label></span>
   </div>
-  <div id="status" style="margin-top:8px;padding:8px 10px;background:#eef3ff;border:1px solid #cdd9f5;border-radius:8px;color:#0a2a6b;font-size:14px;font-weight:500">Gotowy. Włącz kamerę albo wgraj zdjęcie.</div>
-  <div id="warnBox" class="warn hidden"></div>
+
   <div class="diag" id="diagBox"></div>
   <div class="log-panel" id="logBox"></div>
-
-  <div class="grid" style="margin-top:10px">
-    <video id="video" playsinline muted></video>
-    <canvas id="canvas" class="hidden"></canvas>
-  </div>
 </div>
 
 <div class="panel" id="debugPanel" style="border:3px solid #ffb000">
@@ -348,6 +354,23 @@
       setStep(2);
       setStatus("Kamera działa. Pokaż QR z karty (lub klucza).");
       setWarn("");
+      // Sprawdź czy urządzenie wspiera latarkę i pokaż przycisk
+      try{
+        const track = stream.getVideoTracks()[0];
+        const caps = (track && track.getCapabilities) ? track.getCapabilities() : {};
+        const torchBtnEl = document.getElementById("torchBtn");
+        if(torchBtnEl){
+          if(caps && "torch" in caps){
+            torchBtnEl.hidden = false;
+            logOk("Latarka wspierana przez urządzenie.");
+          } else {
+            torchBtnEl.hidden = true;
+            logInfo("Latarka NIE wspierana (brak 'torch' w capabilities).");
+          }
+        }
+      }catch(e){
+        logErr("torch capability check error:", e && (e.message||e));
+      }
     }catch(e){
       logErr("getUserMedia error:", e.name, e.message);
       let msg = e.message || String(e);
@@ -647,14 +670,18 @@
       cellInfo.push({ ratios, centers, taskIdx: i });
     }
 
-    // Adaptacyjny próg: szukamy progu między „pustymi" a „zamalowanymi"
-    // Empiryczny: > 0.30 to zwykle zamalowanie, < 0.15 to puste.
-    // Dodatkowo bierzemy 30% wyżej od mediany jako fallback.
+    // Adaptacyjny próg ABSOLUTNY (dla wyraźnie zaznaczonych kratek).
+    // Obniżony żeby łapać też lżejsze zamalowania.
     const sorted = allRatios.slice().sort((a,b)=>a-b);
     const median = sorted[Math.floor(sorted.length/2)] || 0;
-    const ABS_MIN = 0.28;
-    const adaptive = Math.max(ABS_MIN, median + 0.18);
-    const ratioThr = Math.min(adaptive, 0.55);
+    const ABS_MIN = 0.20;
+    const adaptive = Math.max(ABS_MIN, median + 0.12);
+    const ratioThr = Math.min(adaptive, 0.50);
+
+    // Parametry detekcji WZGLĘDNEJ (gdy żadna kratka nie przekracza absolutnego progu,
+    // ale jedna jest wyraźnie ciemniejsza od reszty — np. lekki znak ołówkiem).
+    const REL_MIN_FILL = 0.12; // minimalna gęstość żeby w ogóle rozważać
+    const REL_GAP = 0.08;       // o ile musi być ciemniejsza od drugiej najciemniejszej
 
     for(let i=0;i<taskCount;i++){
       const t = spec.tasks[i];
@@ -664,17 +691,33 @@
       }
       const info = cellInfo[i];
       const ratios = info.ratios;
+
+      // Krok 1: próg absolutny
       const filled = ratios.map(r => r > ratioThr);
-      const filledCount = filled.filter(Boolean).length;
+      const absCount = filled.filter(Boolean).length;
+
       let marked = null;
-      if(filledCount === 1){
+      let mode = "none";
+      let filledCount = absCount;
+
+      if(absCount === 1){
         marked = LETTERS[filled.findIndex(Boolean)];
-      } else if(filledCount > 1){
-        // Wielokrotne zaznaczenie — niejednoznaczne
-        marked = null;
+        mode = "abs";
+      } else if(absCount === 0){
+        // Krok 2: detekcja względna — czy jedna kratka jest wyraźnie ciemniejsza?
+        const rs = ratios.map((r, idx)=>({ r, idx })).sort((a,b)=>b.r-a.r);
+        const top = rs[0];
+        const second = rs[1] || { r: 0, idx: -1 };
+        if(top.r >= REL_MIN_FILL && (top.r - second.r) >= REL_GAP){
+          marked = LETTERS[top.idx];
+          mode = "rel";
+          filledCount = 1; // traktujemy jak 1
+        }
       }
+      // absCount > 1: niejednoznaczne, zostaje null
+
       answers.push({
-        nr: t.nr, type: "closed", marked, filledCount,
+        nr: t.nr, type: "closed", marked, filledCount, mode,
         ratios: ratios.map(r => +r.toFixed(3)),
         ratioThr: +ratioThr.toFixed(3)
       });
@@ -892,6 +935,37 @@
     setStep(stream ? 2 : 1);
     setStatus(stream ? "Reset. Zeskanuj QR ponownie." : "Reset. Włącz kamerę albo wgraj QR z dysku.");
   });
+
+  // Latarka
+  let torchOn = false;
+  async function setTorch(on){
+    if(!stream){ setStatus("Najpierw włącz kamerę."); return; }
+    const track = stream.getVideoTracks()[0];
+    if(!track){ setStatus("Brak strumienia wideo."); return; }
+    const caps = track.getCapabilities ? track.getCapabilities() : {};
+    if(!("torch" in caps)){
+      setStatus("To urządzenie/przeglądarka nie wspiera latarki.");
+      return;
+    }
+    try{
+      await track.applyConstraints({ advanced: [{ torch: !!on }] });
+      torchOn = !!on;
+      const btn = document.getElementById("torchBtn");
+      if(btn){
+        btn.textContent = torchOn ? "💡 Latarka: WŁ" : "💡 Latarka";
+        btn.style.background = torchOn ? "#ffd84d" : "";
+        btn.style.borderColor = torchOn ? "#b08800" : "";
+      }
+      logOk("Torch:", torchOn ? "ON" : "OFF");
+    }catch(e){
+      logErr("Torch error:", e && (e.message||e));
+      setStatus("Błąd latarki: " + (e.message||e));
+    }
+  }
+  const torchBtnEl = document.getElementById("torchBtn");
+  if(torchBtnEl){
+    torchBtnEl.addEventListener("click", ()=> setTorch(!torchOn));
+  }
 
   // Placeholder na canvasie debug
   (function initDebugPlaceholder(){
