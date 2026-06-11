@@ -192,15 +192,25 @@
       errBox.classList.add("show");
       return;
     }
-    const h = await sha256Hex(AUTH.salt + "|" + p);
-    if(h !== AUTH.hash){
+    try{
+      if(!crypto || !crypto.subtle || !crypto.subtle.digest){
+        errBox.textContent = "Twoja przeglądarka nie wspiera Web Crypto. Otwórz stronę przez HTTPS lub w innej przeglądarce.";
+        errBox.classList.add("show");
+        return;
+      }
+      const h = await sha256Hex(AUTH.salt + "|" + p);
+      if(h !== AUTH.hash){
+        errBox.textContent = "Błędny login lub hasło.";
+        errBox.classList.add("show");
+        return;
+      }
+      setSession({ user: u, ts: Date.now() }, remember.checked);
+      passInp.value = "";
+      showLogged(u);
+    }catch(err){
+      errBox.textContent = "Błąd logowania: " + (err.message || err);
       errBox.classList.add("show");
-      return;
     }
-
-    setSession({ user: u, ts: Date.now() }, remember.checked);
-    passInp.value = "";
-    showLogged(u);
   });
 
   document.getElementById("logoutBtn").addEventListener("click", ()=>{

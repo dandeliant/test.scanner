@@ -114,7 +114,6 @@
     <button type="button" class="upload-btn" id="btnUploadSheet" disabled>Wgraj zdjęcie karty</button>
     <input id="fileQR" type="file" accept="image/*" style="position:absolute;left:-9999px;width:1px;height:1px;opacity:0" />
     <input id="fileSheet" type="file" accept="image/*" style="position:absolute;left:-9999px;width:1px;height:1px;opacity:0" />
-    <span class="chip" style="margin-left:auto"><input id="debug" type="checkbox" /><label for="debug">Debug (legacy toggle)</label></span>
   </div>
 
   <div class="diag" id="diagBox"></div>
@@ -224,7 +223,6 @@
 
   const dbgCanvas = document.getElementById("debugCanvas");
   const dbgCtx = dbgCanvas.getContext("2d");
-  const debugToggle = document.getElementById("debug");
 
   const statusEl = document.getElementById("status");
   const keyStateEl = document.getElementById("keyState");
@@ -425,6 +423,8 @@
   function expandPayload(p){
     if(!p || typeof p !== "object") throw new Error("QR: nieprawidłowy obiekt.");
     if(!Array.isArray(p.t)) throw new Error("QR: brak pola t[].");
+    if(p.t.length === 0) throw new Error("QR: pusta lista zadań.");
+    if(p.t.length > 200) throw new Error("QR: zbyt wiele zadań (>200).");
     const tasks = p.t.map((entry, i)=>{
       if(!Array.isArray(entry) || entry.length < 2) throw new Error(`QR: zły wpis t[${i}].`);
       const [opts, correctIdx] = entry;
@@ -734,25 +734,34 @@
       const filled = ratios.map(r => r > ratioThr);
       const absCount = filled.filter(Boolean).length;
 
+      // Posortuj raz, używamy dla 3 ścieżek decyzyjnych
+      const rs = ratios.map((r, idx)=>({ r, idx })).sort((a,b)=>b.r-a.r);
+      const top = rs[0];
+      const second = rs[1] || { r: 0, idx: -1 };
+
       let marked = null;
       let mode = "none";
       let filledCount = absCount;
 
+      const DOMINANT_GAP = 0.20; // próg "wyraźnie ciemniejsza od kolejnej"
+
       if(absCount === 1){
+        // Dokładnie jedna nad progiem — najprostszy przypadek
         marked = LETTERS[filled.findIndex(Boolean)];
         mode = "abs";
-      } else if(absCount === 0){
-        // Krok 2: detekcja względna — czy jedna kratka jest wyraźnie ciemniejsza?
-        const rs = ratios.map((r, idx)=>({ r, idx })).sort((a,b)=>b.r-a.r);
-        const top = rs[0];
-        const second = rs[1] || { r: 0, idx: -1 };
-        if(top.r >= REL_MIN_FILL && (top.r - second.r) >= REL_GAP){
-          marked = LETTERS[top.idx];
-          mode = "rel";
-          filledCount = 1; // traktujemy jak 1
-        }
+      } else if(absCount >= 2 && (top.r - second.r) >= DOMINANT_GAP){
+        // Wiele nad progiem, ale top jest dużo ciemniejsza → przyjmij top
+        // (np. zaznaczenie A + smuga/podkreślenie na B)
+        marked = LETTERS[top.idx];
+        mode = "dominant";
+        filledCount = 1;
+      } else if(absCount === 0 && top.r >= REL_MIN_FILL && (top.r - second.r) >= REL_GAP){
+        // Bardzo lekkie zaznaczenie (ołówek), ale wyraźnie wybijające się
+        marked = LETTERS[top.idx];
+        mode = "rel";
+        filledCount = 1;
       }
-      // absCount > 1: niejednoznaczne, zostaje null
+      // pozostałe absCount >= 2 bez dominacji: niejednoznaczne (marked=null)
 
       answers.push({
         nr: t.nr, type: "closed", marked, filledCount, mode,
@@ -903,7 +912,15 @@
       }
       summaryEl.innerHTML = `Wynik: <span class="pct">${score.pct}%</span> &nbsp; (${score.got}/${score.max} pkt)`;
       resultEl.textContent = lines.join("\n");
-      setStatus("Gotowe. Jeśli wyniki są nietrafione: włącz Debug i sprawdź podgląd.");
+      // Inteligentny status: ostrzeż jeśli 0/max — prawdopodobnie zły skan
+      if(score.max > 0 && score.got === 0){
+        setStatus(`Skanowanie się udało, ALE wynik 0/${score.max}. Możliwa zła klatka lub uczeń nic nie zaznaczył. Sprawdź podgląd debug poniżej.`);
+        showErrBanner(`Uwaga: wynik 0% — sprawdź podgląd debug (kratki czerwone = algorytm nie wykrył zaznaczenia).`);
+      } else if(score.max > 0 && score.got === score.max){
+        setStatus(`Sukces: ${score.pct}% (${score.got}/${score.max} pkt). Wszystko poprawne!`);
+      } else {
+        setStatus(`Gotowe: ${score.pct}% (${score.got}/${score.max} pkt). Jeśli wyniki nietrafione — sprawdź podgląd debug.`);
+      }
     } finally {
       src.delete();
       if(warped) warped.delete();
@@ -975,8 +992,12 @@
     keyStateEl.textContent = "brak";
     keyStateEl.className = "bad";
     keyPreviewEl.textContent = "(najpierw zeskanuj QR z karty)";
-    summaryEl.textContent = "Wynik pojawi się po skanie karty.";
+    summaryEl.innerHTML = "Wynik pojawi się po skanie karty.";
     resultEl.textContent = "";
+    // Schowaj czerwony baner błędów
+    const _eb = document.getElementById("errBanner");
+    if(_eb){ _eb.classList.remove("show"); _eb.textContent = ""; }
+    setWarn("");
     btnSheet.disabled = true;
     btnUploadSheet.disabled = true;
     window.__ts_lastDebugReady = false;

@@ -237,11 +237,14 @@
   function compactPayload(spec){
     return {
       v: 2,
-      t: spec.tasks.map(t =>
-        t.type === "open"
-          ? [0, 0]
-          : [t.options, LETTERS.indexOf(t.correct)]
-      )
+      t: spec.tasks.map(t => {
+        if(t.type === "open") return [0, 0];
+        // Zabezpieczenie: jeśli z jakiegoś powodu correct nie jest w LETTERS,
+        // wymuś indeks 0 (A) zamiast wrzucać -1 do QR.
+        const idx = LETTERS.indexOf(t.correct);
+        const safeIdx = (idx < 0 || idx >= t.options) ? 0 : idx;
+        return [t.options, safeIdx];
+      })
     };
   }
 
@@ -327,9 +330,9 @@
           const {cx} = bubbleCenter(colX, rowIdx, j, rowH);
           const isCorrect = isKey && j === correctIdx;
           const fill = isCorrect ? "#000" : "#fff";
-          const stroke = isCorrect ? "#000" : "var(--accent)";
+          const strokeCol = isCorrect ? "#000" : "#b00020";
           const txtCol = isCorrect ? "#fff" : "#b00020";
-          s += `<rect x="${cx - L.bubbleSize/2}" y="${cy - L.bubbleSize/2}" width="${L.bubbleSize}" height="${L.bubbleSize}" fill="${fill}" stroke="#b00020" stroke-width="2.4" rx="4" ${isCorrect ? `style="fill:#000;stroke:#000"` : ``}/>`;
+          s += `<rect x="${cx - L.bubbleSize/2}" y="${cy - L.bubbleSize/2}" width="${L.bubbleSize}" height="${L.bubbleSize}" fill="${fill}" stroke="${strokeCol}" stroke-width="2.4" rx="4"/>`;
           const fs = Math.min(20, Math.floor(L.bubbleSize * 0.55));
           s += `<text x="${cx}" y="${cy + fs/3}" text-anchor="middle" font-size="${fs}" font-weight="700" fill="${txtCol}">${LETTERS[j]}</text>`;
         }
